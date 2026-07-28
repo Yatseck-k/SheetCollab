@@ -1,0 +1,18 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    paths:
+        - app
+        - routes
+        - tests
+
+    level: 6
+
+    tmpDir: storage/phpstan
+
+    treatPhpDocTypesAsCertain: false
+
+    excludePaths:
+        - app/Orchid/Screens/Examples/*
+        - app/Orchid/Layouts/Examples/*

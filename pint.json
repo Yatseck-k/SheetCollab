@@ -1,0 +1,22 @@
+{
+    "preset": "laravel",
+    "rules": {
+        "declare_strict_types": true,
+        "no_unused_imports": true,
+        "ordered_imports": {
+            "sort_algorithm": "alpha",
+            "imports_order": ["class", "function", "const"]
+        },
+        "global_namespace_import": {
+            "import_classes": false,
+            "import_constants": false,
+            "import_functions": false
+        },
+        "phpdoc_to_comment": false,
+        "single_line_empty_body": true,
+        "new_with_parentheses": {
+            "named_class": true,
+            "anonymous_class": false
+        }
+    }
+}

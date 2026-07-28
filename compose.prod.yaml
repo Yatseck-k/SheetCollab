@@ -1,0 +1,54 @@
+name: sheetcollab-prod
+
+services:
+  app:
+    build:
+      context: './vendor/laravel/sail/runtimes/8.5'
+      dockerfile: Dockerfile
+      args:
+        WWWGROUP: '${WWWGROUP:-1000}'
+    image: 'sheetcollab/app:php8.5'
+    command: php artisan serve --host=0.0.0.0 --port=8080
+    environment:
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_URL: '${APP_URL}'
+      WWWUSER: '${WWWUSER:-1000}'
+      LARAVEL_SAIL: 1
+    ports:
+      - '${APP_HTTP_PORT:-127.0.0.1:8088}:8080'
+    volumes:
+      - '.:/var/www/html'
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+
+  mariadb:
+    image: 'mariadb:11.4.12'
+    environment:
+      MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
+      MYSQL_ROOT_HOST: '%'
+      MYSQL_DATABASE: '${DB_DATABASE}'
+      MYSQL_USER: '${DB_USERNAME}'
+      MYSQL_PASSWORD: '${DB_PASSWORD}'
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'no'
+    volumes:
+      - 'prod-mariadb:/var/lib/mysql'
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      retries: 5
+      timeout: 5s
+    restart: unless-stopped
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  prod-mariadb:
+    driver: local
