@@ -32,6 +32,7 @@ class ActiveCollabIntegration extends Model
         'assignee_mapping' => 'array',
         'label_mapping' => 'array',
         'active' => 'boolean',
+        'uuid_only' => 'boolean',
     ];
 
     public function resolvedBaseUrl(): string

@@ -104,9 +104,9 @@ php artisan test --testsuite Feature
 | `test_it_returns_422_when_row_number_is_zero` | 422 при row_number = 0 |
 | `test_it_returns_404_when_integration_is_inactive` | 404 для неактивной интеграции |
 | `test_it_creates_task_with_minimal_payload_and_no_optional_mappings` | Создание без необязательных полей и маппингов |
-| `test_it_reuses_pending_export_when_retrying_after_partial_failure` | Повторный create использует существующий pending-экспорт |
-| `test_it_marks_export_failed_when_activecollab_api_returns_server_error` | Ошибка AC API при create → статус `failed` |
-| `test_it_marks_update_export_failed_when_activecollab_api_returns_server_error` | Ошибка AC API при update → статус `failed` |
+| `test_it_blocks_legacy_pending_without_repeating_create` | Старый pending классифицируется unknown, HTTP запрещён |
+| `test_it_marks_export_failed_when_activecollab_api_returns_server_error` | Ошибка AC после dispatch → legacy failed и новое unknown |
+| `test_it_marks_update_export_failed_when_activecollab_api_returns_server_error` | Ошибка AC при update → unknown с сохранением подтверждённой связи |
 | `test_get_users_returns_activecollab_users` | GET /users проксирует ответ AC |
 | `test_get_labels_returns_activecollab_labels` | GET /labels проксирует ответ AC |
 | ...и другие вариации вышеперечисленных сценариев | |
@@ -132,37 +132,14 @@ php artisan test --testsuite Feature
 | `test_create_task_list_for_connection_posts_name` | POST создания task list |
 | `test_get_users_hits_users_endpoint_with_global_token` | GET /users с глобальным токеном |
 | `test_get_labels_hits_labels_endpoint_with_global_token` | GET /labels |
-| `test_send_throws_on_4xx_response` | 404 от AC → RequestException |
-| `test_send_throws_on_5xx_response` | 500 от AC → RequestException |
+| `test_send_throws_on_4xx_response` | 404 от AC → безопасный ActiveCollabRequestException |
+| `test_send_throws_on_5xx_response` | 500 от AC → безопасный ActiveCollabRequestException |
 
 ---
 
-### Feature: ActiveCollabExportRepositoryTest (9 тестов)
+### Feature: ActiveCollabExportRepositoryTest
 
-`tests/Feature/ActiveCollabExportRepositoryTest.php`
-
-Тестирует CRUD-операции репозитория экспортов. Использует `RefreshDatabase`.
-
-**Вспомогательные методы:**
-```php
-private function makeData(array $overrides = []): ActiveCollabTaskData
-private function createExport(array $overrides = []): ActiveCollabTaskExport
-```
-
-| Тест | Сценарий |
-|------|---------|
-| `test_find_by_external_id_returns_matching_export` | Поиск по external_id |
-| `test_find_by_external_id_returns_null_when_not_found` | null при отсутствии |
-| `test_find_by_task_id_returns_matching_export` | Поиск по task_id |
-| `test_find_by_task_id_returns_null_when_not_found` | null при отсутствии |
-| `test_create_pending_creates_export_with_pending_status` | createPending → статус pending |
-| `test_create_pending_sets_correct_fields` | Все поля заполнены корректно |
-| `test_mark_created_updates_status_and_persists_all_ac_data` | markCreated → статус created, все поля |
-| `test_mark_updated_changes_status_and_updates_payloads` | markUpdated → статус updated |
-| `test_mark_failed_sets_failed_status_with_error_message` | markFailed → статус failed с message |
-| `test_mark_failed_can_be_called_on_previously_created_export` | Переход created → failed |
-
----
+Проверяет reservation и competing request, атомарное завершение export+attempt, expiry до dispatch и после HTTP, защиту от старого operation ID, rollback при ошибке записи attempt, scoped lookup и lazy-классификацию legacy pending. Безусловные createPending/markCreated/markUpdated/markFailed удалены: все новые записи проходят operation ownership.
 
 ### Feature: ActiveCollabIntegrationRepositoryTest (4 теста)
 
@@ -405,3 +382,52 @@ class MyFeatureTest extends TestCase
     }
 }
 ```
+
+
+## Реальная конкуренция на MariaDB
+
+`ActiveCollabSyncConcurrencyTest` пропускается при обычном SQLite-запуске. Он запускается отдельно с `phpunit.mariadb.xml`, требует PHP 8.5 с pdo_mysql и отдельную MariaDB 11.4.12. Перед каждым сценарием выполняется migrate:fresh **только** в БД с точным именем `sheetcollab_concurrency_test`; harness проверяет testing environment и mariadb driver до очистки. Не указывать production credentials/host и не использовать рабочий volume. Внешние DB-параметры задаются runner-окружением; DB_URL принудительно пуст.
+
+```bash
+DB_HOST=isolated-mariadb DB_PORT=3306 DB_DATABASE=sheetcollab_concurrency_test \
+DB_USERNAME=sheetcollab_test DB_PASSWORD=test-only-password \
+php vendor/bin/phpunit -c phpunit.mariadb.xml
+```
+
+Рекомендуется выделенная internal Docker network, DB с tmpfs и отдельный PHP runner. Продуктовый compose и `.env` менять не нужно. Два независимых процесса приложения используют разные соединения с общей БД, файловый barrier и общий locked counter fake HTTP. Worker проверяет, что DB transactionLevel() на HTTP равен 0. Проверяются первый insert, существующий idle export, bound update, одновременный старт и независимые строки. Только один запрос одной записи отправляет HTTP; конкурент завершается 409 до освобождения победителя. Рабочий AC не вызывается.
+
+Новые feature-тесты моделируют timeout, malformed success, commit failure после внешнего успеха, недоступность сохранения unknown, поздний ответ, отражённый токен и безопасный повтор после mapping failure. Backfill tests покрывают dry-run, повторяемость, chunks, orphan/malformed snapshots и upgrade старой схемы; SQLite не заменяет проверку MariaDB locks.
+
+
+## Проверки восстановления (шаг 1.3)
+
+- `ActiveCollabRecoveryTest`: bind/verify/explicit absence/replacement, безопасный GET, source whitelist, redaction, frozen destination при смене fallback token, отзыв прав перед finalize, stale/replayed forms, audit rollback, сохранение старой unknown попытки и nullable actor FK.
+- `ActiveCollabRecoveryScreenTest`: реальный Orchid маршрут и render, AND-права вместо OR, guest/role permissions, прямые POST, GET action=405, CSRF, лимит 16 KiB, обязательное подтверждение, отсутствие секретов/неэкранированного HTML. UI validation возвращает штатный form redirect с errors, API errors сохраняют JSON.
+- `ExpireActiveCollabSyncOperationsTest`: dry-run, chunks >100, повторяемость, null lease и missing attempt без выдуманной истории/HTTP.
+- MariaDB suite расширен: recovery vs обычный sync, два recovery, sweep vs late result, ошибка записи audit в дочернем процессе. Сохраняются все пять гонок 1.2; настройки изолированной БД и защитные проверки прежние.
+
+Fake HTTP при многошаговом сценарии задаётся одной последовательностью: повторный Http::fake может сохранять предыдущие stub callbacks. Проверки должны действительно получать предусмотренные 500 → 404 → success, а не проходить на первом старом stub.
+
+UI screenshot при доступном локальном Chromium выполняется на отдельной SQLite preview DB с тестовым администратором, без подключения к рабочему AC/Sheets. Это проверка render/читаемости, а не live integration e2e.
+
+## UUID и Apps Script (шаг 1.4)
+
+```bash
+php vendor/bin/phpunit --filter 'ActiveCollabTaskDataTest|ActiveCollabRecordUuidManifestTest|ActiveCollabTaskApiTest|ActiveCollabExportRepositoryTest|ActiveCollabRecoveryTest|MigrateActiveCollabRecordUuidsTest'
+node --test tests/AppsScript/activecollab_sync.test.cjs
+```
+
+JS harness использует встроенные Node test/vm без новых npm-пакетов и исполняет реальный .gs с fake SpreadsheetApp/LockService/UrlFetchApp. Проверяет сохранение UUID до fetch, ожидание lock с перечитыванием, duplicate UUID между листами, новую копию, вставку/перемещение во время HTTP, удаление/дубликат target, network/validation/409, безопасный URL и манифест без внешнего HTTP. Это не live Google e2e.
+
+PHP tests покрывают UUID/legacy границы и scoped update, повторное использование locator, исторический source recovery, paused migration/dry-run/full coverage/idempotency/audit rollback, ограничения манифеста и guarded down. MariaDB suite дополнительно проверяет два процесса одного UUID на разных позициях, разные UUID на одной позиции и попытку переноса во время sync/recovery. Первый legacy insert проверяется уже после снятия global unique. SQLite не доказывает блокировки MariaDB.
+
+### Ручная проверка в отдельной Google-таблице
+
+1. Создать отдельную тестовую интеграцию и таблицу, установить проверенную DB-версию UUID-скрипта, выполнить описанный в DEPLOY переход, не использовать production данные/AC.
+2. Синхронизировать строку; сохранить UUID/task ID. Отсортировать **полные строки вместе со скрытой колонкой**, вставить строку сверху, перенести полную запись на другой корректно размеченный лист. Update сохраняет UUID/task ID.
+3. При задержанном тестовом ответе переместить полную строку: ссылка/error/date должны попасть в строку с UUID. Удаление или дубликат UUID во время запроса дают предупреждение без записи в прежнюю позицию.
+4. Скопировать полную строку: отправка блокируется. На копии явно выбрать новую запись; UUID меняется только у копии, link/error/date очищаются. У оригинала всё прежнее.
+5. Из двух Google-сессий запустить действие для строки без UUID: сохранён один UUID, нет автоматической перегенерации. Проверить timeout lock и повторное чтение.
+6. Проверить ошибки validation, unresolved outcome и remote_missing: нет автоматического create/retry. Не сортировать только бизнес-колонки: скрытая колонка не может защитить такой сценарий. LockService не блокирует ручную правку между последней проверкой и записью.
+
+Отмечать реально выполненные шаги/Google runtime отдельно. Без доступа оставить «не выполнено», не заменять ручной результат Node fake или историческим screenshot.

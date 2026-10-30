@@ -38,6 +38,9 @@ return [
     ],
 
     'active_collab' => [
+        'connect_timeout' => (int) env('ACTIVECOLLAB_CONNECT_TIMEOUT', 5),
+        'timeout' => (int) env('ACTIVECOLLAB_TIMEOUT', 30),
+        'lease_seconds' => (int) env('ACTIVECOLLAB_SYNC_LEASE_SECONDS', 120),
         'base_url' => env('ACTIVECOLLAB_BASE_URL', 'https://your-activecollab.example.com/api/v1'),
         'project_id' => (int) env('ACTIVECOLLAB_PROJECT_ID', 10),
         'api_token' => env('ACTIVECOLLAB_API_TOKEN'),

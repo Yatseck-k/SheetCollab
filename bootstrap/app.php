@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use App\Exceptions\ActiveCollabRequestException;
 use App\Exceptions\IntegrationNotFoundException;
 use App\Exceptions\TaskAlreadyExistsException;
+use App\Exceptions\TaskBindingConflictException;
+use App\Exceptions\TaskSyncConflictException;
 use App\Http\Middleware\VerifyIntegrationToken;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -29,6 +32,30 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $exceptions->render(function (IntegrationNotFoundException $e) {
             return response()->json(['message' => $e->getMessage()], 404);
+        });
+
+        $exceptions->render(function (TaskSyncConflictException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'error' => ['code' => $e->errorCode, 'message' => $e->getMessage(),
+                    'operation_id' => $e->operationId, 'retryable' => false],
+            ], $e->httpStatus);
+        });
+
+        $exceptions->render(function (ActiveCollabRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->timeout ? 504 : 502);
+        });
+
+        $exceptions->render(function (TaskBindingConflictException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'error' => [
+                    'code' => 'legacy_binding_conflict',
+                    'message' => $e->getMessage(),
+                    'operation_id' => null,
+                    'retryable' => false,
+                ],
+            ], 409);
         });
 
         $exceptions->render(function (TaskAlreadyExistsException $e) {

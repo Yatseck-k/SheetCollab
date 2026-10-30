@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Orchid\Layouts\Export;
 
 use App\Models\ActiveCollabTaskExport;
+use Illuminate\Support\Facades\Gate;
 use Orchid\Screen\Actions\Link;
 use Orchid\Screen\Layouts\Table;
 use Orchid\Screen\TD;
@@ -16,6 +17,8 @@ class ExportListLayout extends Table
     /** @return array<int, TD> */
     public function columns(): array
     {
+        $canRecover = Gate::allows('recover', ActiveCollabTaskExport::class);
+
         return [
             TD::make('external_id', 'Строка')
                 ->cantHide()
@@ -29,6 +32,11 @@ class ExportListLayout extends Table
                     'failed' => '<span class="badge bg-danger">Ошибка</span>',
                     default => '<span class="badge bg-secondary">Ожидание</span>',
                 }),
+
+            TD::make('last_attempt_status', 'Последняя попытка')->render(fn (ActiveCollabTaskExport $e): string => e($e->last_attempt_status ?? 'Не классифицировано')),
+            TD::make('binding_status', 'Связь')->render(fn (ActiveCollabTaskExport $e): string => e($e->binding_status ?? 'Не классифицировано')),
+            TD::make('recovery', 'Восстановление')->canSee($canRecover)
+                ->render(fn (ActiveCollabTaskExport $e) => Link::make('Проверить')->route('platform.exports.recovery', ['export' => $e->id])),
 
             TD::make('task_id', 'Task ID')
                 ->align(TD::ALIGN_CENTER)

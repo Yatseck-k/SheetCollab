@@ -89,6 +89,18 @@ class ActiveCollabTaskDataTest extends TestCase
         $this->assertArrayHasKey('sheet_status', $array);
     }
 
+    public function test_record_uuid_is_optional_and_preserved_in_source(): void
+    {
+        foreach ([null, ''] as $missing) {
+            $this->assertNull(ActiveCollabTaskData::fromRequest($this->minimalRequest(['record_uuid' => $missing]))->recordUuid);
+        }
+        $this->assertNull(ActiveCollabTaskData::fromRequest($this->minimalRequest())->recordUuid);
+        $uuid = 'ae091ce2-282a-43ad-a258-85a2b8eecfc4';
+        $data = ActiveCollabTaskData::fromRequest($this->minimalRequest(['record_uuid' => $uuid]));
+        $this->assertSame($uuid, $data->recordUuid);
+        $this->assertSame($uuid, $data->toArray()['record_uuid']);
+    }
+
     // ── helper ───────────────────────────────────────────────────────────────────
 
     /**

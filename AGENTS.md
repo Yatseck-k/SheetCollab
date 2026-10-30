@@ -45,7 +45,7 @@ Follow `.editorconfig`: UTF-8, LF line endings, 4-space indentation for PHP; Mar
 - All HTTP calls to ActiveCollab go through `app/Repositories/ActiveCollab/ActiveCollabRepository.php` only.
 - ActiveCollab API token must not appear in logs, API responses, or exception messages.
 - Controllers stay thin: validate → DTO → service. Business logic lives in services.
-- `external_id` format is always `{spreadsheet_id}:{sheet_id}:{row_number}`.
+- `external_id` format is always `{spreadsheet_id}:{sheet_id}:{row_number}`; it is a nonunique position locator. UUID integrations use `(integration_id, record_uuid)` as identity. Never adopt a legacy binding by row number; use the controlled, audited migration while writers are stopped.
 
 ## Testing Guidelines
 

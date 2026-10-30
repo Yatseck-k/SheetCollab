@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\ActiveCollab;
 
+use App\Data\ActiveCollab\ActiveCollabSyncReservation;
 use App\Data\ActiveCollab\ActiveCollabTaskData;
+use App\Exceptions\ActiveCollabRequestException;
 use App\Exceptions\IntegrationNotFoundException;
-use App\Exceptions\TaskAlreadyExistsException;
+use App\Exceptions\TaskSyncConflictException;
 use App\Models\ActiveCollabIntegration;
-use App\Models\ActiveCollabTaskExport;
 use App\Repositories\ActiveCollab\ActiveCollabExportRepository;
 use App\Repositories\ActiveCollab\ActiveCollabIntegrationRepository;
 use App\Repositories\ActiveCollab\ActiveCollabRepository;
@@ -22,133 +23,105 @@ class ActiveCollabTaskService
         private readonly ActiveCollabIntegrationRepository $integrationRepository,
         private readonly ActiveCollabTaskBodyBuilder $bodyBuilder,
         private readonly ActiveCollabMappingService $mappingService,
+        private readonly ActiveCollabDataSanitizer $sanitizer,
     ) {}
 
     /** @return array<string, mixed> */
     public function create(ActiveCollabTaskData $data): array
     {
-        $integration = $this->resolveIntegration($data->spreadsheetId);
-        $instanceUrl = $integration->resolvedInstanceUrl();
-
-        $existing = $this->exportRepository->findByExternalId($data->externalId);
-
-        if ($existing && in_array($existing->status, ['created', 'updated'], true)) {
-            throw new TaskAlreadyExistsException($existing->task_id, $existing->task_url);
-        }
-
-        $export = $existing ?? $this->exportRepository->createPending($data, $integration);
-
-        try {
-            $payload = $this->buildPayload($data, $integration);
-        } catch (\RuntimeException $e) {
-            $this->exportRepository->markFailed($export, $e->getMessage());
-            Log::warning('ActiveCollab mapping error', [
-                'external_id' => $data->externalId,
-                'message' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
-
-        Log::info('Creating ActiveCollab task', [
-            'external_id' => $data->externalId,
-            'integration_id' => $integration->id,
-            'task_name' => $payload['name'],
-        ]);
-
-        try {
-            $response = $this->acRepository->createTask($integration, $payload);
-        } catch (\Throwable $e) {
-            $this->exportRepository->markFailed($export, $e->getMessage());
-            Log::error('ActiveCollab task creation failed', [
-                'external_id' => $data->externalId,
-                'integration_id' => $integration->id,
-                'message' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
-
-        $taskId = $response['single']['id'];
-        $taskUrl = $instanceUrl.$response['single']['url_path'];
-        $syncHash = $this->calcSyncHash($data);
-
-        $this->exportRepository->markCreated($export, $taskId, $taskUrl, $syncHash, $payload, $response);
-
-        return [
-            'task_id' => $taskId,
-            'task_url' => $taskUrl,
-            'synced_at' => now()->toIso8601String(),
-            'sync_hash' => $syncHash,
-        ];
+        return $this->execute($data);
     }
 
     /** @return array<string, mixed> */
     public function update(int $taskId, ActiveCollabTaskData $data): array
     {
-        $integration = $this->resolveIntegration($data->spreadsheetId);
-        $instanceUrl = $integration->resolvedInstanceUrl();
-
-        $export = $this->exportRepository->findByTaskId($taskId)
-            ?? $this->exportRepository->findByExternalId($data->externalId);
-
-        try {
-            $payload = $this->buildPayload($data, $integration);
-        } catch (\RuntimeException $e) {
-            if ($export instanceof ActiveCollabTaskExport) {
-                $this->exportRepository->markFailed($export, $e->getMessage());
-            }
-            Log::warning('ActiveCollab mapping error on update', [
-                'task_id' => $taskId,
-                'external_id' => $data->externalId,
-                'message' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
-
-        Log::info('Updating ActiveCollab task', [
-            'task_id' => $taskId,
-            'external_id' => $data->externalId,
-            'integration_id' => $integration->id,
-        ]);
-
-        try {
-            $response = $this->acRepository->updateTask($integration, $taskId, $payload);
-        } catch (\Throwable $e) {
-            if ($export instanceof ActiveCollabTaskExport) {
-                $this->exportRepository->markFailed($export, $e->getMessage());
-            }
-            Log::error('ActiveCollab task update failed', [
-                'task_id' => $taskId,
-                'integration_id' => $integration->id,
-                'message' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
-
-        $taskUrl = $instanceUrl.$response['single']['url_path'];
-        $syncHash = $this->calcSyncHash($data);
-
-        if ($export instanceof ActiveCollabTaskExport) {
-            $this->exportRepository->markUpdated($export, $syncHash, $data->toArray(), $payload, $response);
-        }
-
-        return [
-            'task_id' => $taskId,
-            'task_url' => $taskUrl,
-            'synced_at' => now()->toIso8601String(),
-            'sync_hash' => $syncHash,
-        ];
+        return $this->execute($data, $taskId);
     }
 
-    private function resolveIntegration(string $spreadsheetId): ActiveCollabIntegration
+    /** @return array<string, mixed> */
+    private function execute(ActiveCollabTaskData $data, ?int $taskId = null): array
     {
-        $integration = $this->integrationRepository->findBySpreadsheetId($spreadsheetId);
-
-        if (! $integration instanceof ActiveCollabIntegration) {
-            Log::warning('ActiveCollab integration not found', ['spreadsheet_id' => $spreadsheetId]);
-            throw new IntegrationNotFoundException($spreadsheetId);
+        $integration = $this->integrationRepository->findBySpreadsheetId($data->spreadsheetId);
+        if ($integration === null) {
+            throw new IntegrationNotFoundException($data->spreadsheetId);
+        }
+        $source = $this->sanitizer->clean($data->toArray(), $integration);
+        $reservation = $this->exportRepository->reserve($data, $integration, $source, $taskId);
+        if ($reservation->conflictCode !== null) {
+            throw new TaskSyncConflictException($reservation->conflictCode, $reservation->operationId);
         }
 
-        return $integration;
+        return $this->executeReserved($data, $integration, $reservation, $taskId);
+    }
+
+    /**
+     * A replacement uses a server-authorized reservation; public API callers cannot bypass reserve().
+     *
+     * @return array<string, mixed>
+     */
+    public function executeReserved(ActiveCollabTaskData $data, ActiveCollabIntegration $integration,
+        ActiveCollabSyncReservation $reservation, ?int $taskId = null, ?\Closure $guard = null): array
+    {
+        $source = $this->sanitizer->clean($data->toArray(), $integration);
+        try {
+            $payload = $this->buildPayload($data, $integration);
+            $hash = $this->calcSyncHash($data);
+        } catch (\Throwable $e) {
+            $message = $this->sanitizer->clean(['message' => $e->getMessage()], $integration)['message'];
+            $saved = $this->recordFailure($reservation, 'failed', 'mapping_invalid', $message, guard: $guard);
+            throw new TaskSyncConflictException($saved ? 'mapping_invalid' : 'sync_outcome_unknown', $reservation->operationId, 500);
+        }
+        try {
+            if ($guard !== null) {
+                $guard();
+            }
+            $prepared = $this->exportRepository->prepareDispatch($reservation, $this->sanitizer->clean($payload, $integration), $hash);
+        } catch (\Throwable) {
+            $saved = $this->recordFailure($reservation, 'failed', 'pre_dispatch_failed', 'Local preparation failed before dispatch.', guard: $guard);
+            throw new TaskSyncConflictException($saved ? 'pre_dispatch_failed' : 'sync_outcome_unknown', $reservation->operationId, 502);
+        }
+        if (! $prepared) {
+            throw new TaskSyncConflictException('sync_outcome_unknown', $reservation->operationId);
+        }
+        try {
+            $response = $taskId === null
+                ? $this->acRepository->createTask($integration, $payload)
+                : $this->acRepository->updateTask($integration, $taskId, $payload);
+            $response = $this->sanitizer->clean($response, $integration);
+            $resultTaskId = $response['single']['id'];
+            $taskUrl = $this->sanitizer->clean(['url' => $integration->resolvedInstanceUrl().$response['single']['url_path']], $integration)['url'];
+            $completed = $this->exportRepository->complete($reservation, 'succeeded', [
+                'task_id' => $resultTaskId, 'task_url' => $taskUrl, 'sync_hash' => $hash,
+                'source_payload' => $source, 'active_collab_payload' => $this->sanitizer->clean($payload, $integration),
+                'active_collab_response' => $response,
+            ], guard: $guard);
+        } catch (\Throwable $e) {
+            $httpStatus = $e instanceof ActiveCollabRequestException ? $e->httpStatus : null;
+            $timeout = $e instanceof ActiveCollabRequestException && $e->timeout;
+            $missing = $taskId !== null && $httpStatus === 404;
+            $code = $missing ? 'remote_task_missing' : ($e instanceof ActiveCollabRequestException ? $e->category : 'sync_outcome_unknown');
+            $saved = $this->recordFailure($reservation, $missing ? 'failed' : 'unknown', $code, 'External result could not be confirmed.', $httpStatus);
+            Log::warning('ActiveCollab synchronization failed', ['operation_id' => $reservation->operationId, 'http_status' => $httpStatus, 'category' => $code]);
+            throw new TaskSyncConflictException($missing && $saved ? 'remote_task_missing' : 'sync_outcome_unknown',
+                $reservation->operationId, $missing && $saved ? 409 : ($timeout ? 504 : 502));
+        }
+        if (! $completed) {
+            throw new TaskSyncConflictException('sync_outcome_unknown', $reservation->operationId);
+        }
+
+        return ['task_id' => $resultTaskId, 'task_url' => $taskUrl, 'synced_at' => now()->toIso8601String(), 'sync_hash' => $hash];
+    }
+
+    private function recordFailure(ActiveCollabSyncReservation $reservation, string $status, string $code, string $message,
+        ?int $httpStatus = null, ?\Closure $guard = null): bool
+    {
+        try {
+            return $this->exportRepository->complete($reservation, $status, errorCode: $code,
+                errorMessage: $message, httpStatus: $httpStatus, guard: $guard);
+        } catch (\Throwable) {
+            // Durable running remains; expiry cannot grant another external create.
+            return false;
+        }
     }
 
     /** @return array<string, mixed> */

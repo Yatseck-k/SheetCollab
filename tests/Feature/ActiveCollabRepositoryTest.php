@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Exceptions\ActiveCollabRequestException;
 use App\Models\ActiveCollabIntegration;
 use App\Repositories\ActiveCollab\ActiveCollabRepository;
-use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ActiveCollabRepositoryTest extends TestCase
@@ -23,6 +24,7 @@ class ActiveCollabRepositoryTest extends TestCase
         config()->set('services.active_collab.api_token', 'global-token');
         config()->set('services.active_collab.project_id', 10);
 
+        Http::preventStrayRequests();
         $this->repository = new ActiveCollabRepository();
     }
 
@@ -165,7 +167,7 @@ class ActiveCollabRepositoryTest extends TestCase
     {
         Http::fake(['*' => Http::response(['message' => 'Not Found'], 404)]);
 
-        $this->expectException(RequestException::class);
+        $this->expectException(ActiveCollabRequestException::class);
 
         $this->repository->getLabels();
     }
@@ -174,12 +176,60 @@ class ActiveCollabRepositoryTest extends TestCase
     {
         Http::fake(['*' => Http::response(['message' => 'Server Error'], 500)]);
 
-        $this->expectException(RequestException::class);
+        $this->expectException(ActiveCollabRequestException::class);
 
         $this->repository->getUsers();
     }
 
     // ── helper ───────────────────────────────────────────────────────────────────
+
+    /** @param array<string, mixed> $response */
+    #[DataProvider('invalidTaskResponses')]
+    public function test_task_response_must_be_a_confirmed_binding(array $response): void
+    {
+        Http::fake(['*' => Http::response($response)]);
+        $this->expectException(ActiveCollabRequestException::class);
+        $this->repository->createTask($this->makeIntegration(), ['name' => 'Task']);
+    }
+
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function invalidTaskResponses(): array
+    {
+        return [
+            'missing single' => [[]],
+            'string task ID' => [['single' => ['id' => '123', 'url_path' => '/tasks/123']]],
+            'zero task ID' => [['single' => ['id' => 0, 'url_path' => '/tasks/123']]],
+            'missing URL' => [['single' => ['id' => 123]]],
+            'absolute URL' => [['single' => ['id' => 123, 'url_path' => 'https://other.test/tasks/123']]],
+            'protocol relative URL' => [['single' => ['id' => 123, 'url_path' => '//other.test/tasks/123']]],
+            'backslash URL' => [['single' => ['id' => 123, 'url_path' => '/\\other.test/tasks/123']]],
+        ];
+    }
+
+    public function test_update_response_cannot_bind_a_different_task_id(): void
+    {
+        Http::fake(['*' => Http::response(['single' => ['id' => 100, 'url_path' => '/tasks/100']])]);
+        $this->expectException(ActiveCollabRequestException::class);
+        $this->repository->updateTask($this->makeIntegration(), 99, ['name' => 'Task']);
+    }
+
+    public function test_timeouts_are_explicit_and_response_is_whitelisted(): void
+    {
+        $options = [];
+        Http::fake(function ($request, array $requestOptions) use (&$options) {
+            $options = $requestOptions;
+
+            return Http::response([
+                'single' => ['id' => 123, 'url_path' => '/tasks/123', 'api_token' => 'reflected-secret'],
+                'headers' => ['X-Angie-AuthApiToken' => 'reflected-secret'],
+            ]);
+        });
+        $response = $this->repository->createTask($this->makeIntegration(), ['name' => 'Task']);
+        $this->assertSame(['single' => ['id' => 123, 'url_path' => '/tasks/123']], $response);
+        $this->assertEquals(5, $options['connect_timeout']);
+        $this->assertEquals(30, $options['timeout']);
+        Http::assertSentCount(1);
+    }
 
     private function makeIntegration(): ActiveCollabIntegration
     {

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Orchid\Screens\Export\ExportListScreen;
+use App\Orchid\Screens\Export\ExportRecoveryScreen;
 use App\Orchid\Screens\Guide\GuideScreen;
 use App\Orchid\Screens\Integration\IntegrationEditScreen;
 use App\Orchid\Screens\Integration\IntegrationListScreen;
@@ -48,6 +49,8 @@ Route::screen('integrations', IntegrationListScreen::class)
         ->push('Интеграции'));
 
 // Exports
+Route::screen('exports/{export}/recovery', ExportRecoveryScreen::class)->name('platform.exports.recovery');
+
 Route::screen('exports', ExportListScreen::class)
     ->name('platform.exports')
     ->breadcrumbs(fn (Trail $trail) => $trail

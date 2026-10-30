@@ -58,7 +58,7 @@ docker compose exec laravel.test ./vendor/bin/phpstan analyse --memory-limit=1G
 - ActiveCollab API token must never appear in logs, API responses, or exception messages.
 - Controllers stay thin: `validate → DTO → service`. Business logic lives in services.
 - Repository pattern for all DB access and external HTTP calls.
-- `external_id` format is always `{spreadsheet_id}:{sheet_id}:{row_number}`. Never change without updating `ActiveCollabExportRepository` and the Apps Script simultaneously.
+- `external_id` format remains `{spreadsheet_id}:{sheet_id}:{row_number}`; it is a nonunique position locator. UUID integrations identify records only by `(integration_id, record_uuid)`, never adopt a binding by row number. Legacy integrations keep guarded locator lookup until explicit migration.
 
 **Must not introduce:**
 
@@ -73,8 +73,14 @@ docker compose exec laravel.test ./vendor/bin/phpstan analyse --memory-limit=1G
 
 ### Export status flow
 
-`pending` → `created` or `failed` (create); `created` → `updated` or `failed` (update).
+Legacy `status` remains `pending/created/updated/failed` for existing consumers; it never grants permission to send HTTP.
+`last_attempt_status`: `idle` → `running` → `succeeded/failed/unknown`. Only failures confirmed before dispatch are safely retryable. A bound PUT 404 becomes remote_missing with the binding preserved; it never grants automatic replacement. Historical pending/failed with null new state are conservatively classified unknown.
+`binding_status`: `unbound/bound/remote_missing`; failed/unknown must preserve the last confirmed task ID/URL, hash and payload.
+Reserve an operation and its attempt atomically in `ActiveCollabExportRepository`, commit before external HTTP, then complete both under the same operation ID and running-state lock. Expired lease becomes unknown, never takeover. Reject ordinary retries of unknown. Only explicit admin recovery with expected-state checks, a new operation ID and an atomic audit may resolve it. Do not mix old and new writers.
 Never set `created`/`updated` without recording `task_id`, `task_url`, `sync_hash`, `active_collab_payload`, and `active_collab_response`.
+Admin recovery requires all three Orchid permissions: platform.activecollab.recovery, platform.systems.users, platform.systems.roles. Recheck the actor and frozen effective destination before finalization. GET verifies existence/binding only: invalidate hash, never fabricate synced_at. Keep old unknown attempts unchanged and append a reconcile attempt plus requested/result audit phases.
+The scheduled integrations:expire-sync-operations command marks only expired running operations unknown; missing attempt history is reported, never fabricated.
+Attempts store only sanitized source/task fields and whitelisted response `single.id/url_path`. Never store or log raw upstream exception messages, response bodies or auth headers. No automatic POST/PUT retries. Connect/total timeout defaults are 5/30 seconds, with a 120-second lease that must exceed total timeout.
 
 ### Mapping resolution
 
@@ -89,6 +95,7 @@ Calculated in `ActiveCollabTaskService::calcSyncHash()` — MD5 of 13 data field
 
 ### AC API response shape
 
+For recovery GET, validate exact task ID, project_id and boolean is_trashed; 404 alone does not prove deletion or absence of an earlier create. Do not automatically retry POST/PUT or search by task text.
 Always access task ID via `$response['single']['id']` and URL via `$response['single']['url_path']`.
 
 ### Auth
@@ -103,9 +110,15 @@ Always access task ID via `$response['single']['id']` and URL via `$response['si
 
 HTML with sections: Описание проблемы, Параметры (ul), Скриншоты (only if URL), Комментарий (only if present), hr, Источник. HTML-escape all user content. nl2br for multi-line fields. Skip empty sections entirely.
 
+### Record identity
+
+`uuid_only` defaults false and is changed only by the paused, audited `integrations:migrate-record-uuids` command. UUID and legacy modes do not mix: mismatched requests return legacy_binding_conflict. Any existing UUID binding blocks legacy writes even before the readiness flag is enabled. Reserve locks integration then export; HTTP runs after commit. Recovery taking both locks uses the same order. Orphan/ambiguous history blocks migration; UUID comes from Sheets, and an existing task link confirms initial adoption. Keep unknown/remote_missing and historical attempts unchanged. Never roll back to row-number code after UUID bindings without a separate stopped-writer recovery procedure.
+
 ### Apps Script
 
 `resources/apps-script/activecollab_sync.gs` is the source template. The canonical working version is stored in the database via the Orchid admin `Apps Script` section. The file on disk is only used as a bootstrap template when no DB record exists.
+
+The UUID template uses a hidden `SheetCollab UUID` column, document locks and a whole-spreadsheet duplicate check. Sort full rows including this column. After HTTP find the unique UUID again before writing the result. Explicit new-copy action resets only the selected copy. Existing DB script versions require export/review/manual update through the editor; changing the bootstrap file alone does not deploy a client update.
 
 Apps Script reads `INTEGRATION_SERVICE_URL` and `INTEGRATION_SERVICE_TOKEN` from Script Properties and calls Laravel. The ActiveCollab token must never appear in Apps Script.
 

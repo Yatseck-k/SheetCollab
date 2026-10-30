@@ -32,6 +32,7 @@ CREATE TABLE active_collab_integrations (
     task_list_mapping           JSON             NULL,
     assignee_mapping            JSON             NULL,
     label_mapping               JSON             NULL,
+    uuid_only                   TINYINT(1)       NOT NULL DEFAULT 0,
     active                      TINYINT(1)       NOT NULL DEFAULT 1,
     created_at                  TIMESTAMP        NULL,
     updated_at                  TIMESTAMP        NULL
@@ -52,6 +53,7 @@ CREATE TABLE active_collab_integrations (
 | `task_list_mapping` | JSON | да | Маппинг `task_type → task_list_id`. Ключи — lowercase строки |
 | `assignee_mapping` | JSON | да | Маппинг `responsible → user_id`. Ключи — exact match строки |
 | `label_mapping` | JSON | да | Маппинг `severity → label_id`. Ключи — lowercase строки |
+| `uuid_only` | boolean | нет | Готовность к UUID-only; false по умолчанию, меняется только контролируемой командой |
 | `active` | boolean | нет | Включена ли интеграция. Только активные интеграции участвуют в синхронизации |
 | `created_at` | timestamp | да | Создана |
 | `updated_at` | timestamp | да | Обновлена |
@@ -110,13 +112,14 @@ $integration->resolvedApiToken(): string
 
 ## active_collab_task_exports
 
-Журнал всех попыток синхронизации строк. Каждая строка таблицы имеет не более одной записи (уникальность по `external_id`).
+Текущее состояние записи и её подтверждённая связь. История попыток хранится отдельно. Идентичность UUID-записи уникальна по `(integration_id, record_uuid)`; legacy locator защищается транзакционным алгоритмом.
 
 ```sql
 CREATE TABLE active_collab_task_exports (
     id                      CHAR(36)         PRIMARY KEY,
     integration_id          CHAR(36)         NULL     INDEX,
-    external_id             VARCHAR(255)     NOT NULL UNIQUE,
+    record_uuid             CHAR(36)         NULL,             -- UNIQUE(integration_id, record_uuid)
+    external_id             VARCHAR(255)     NOT NULL,         -- nonunique INDEX
     spreadsheet_id          VARCHAR(255)     NOT NULL,
     sheet_id                VARCHAR(255)     NOT NULL,
     row_number              INT UNSIGNED     NOT NULL,
@@ -139,8 +142,9 @@ CREATE TABLE active_collab_task_exports (
 | Столбец | Тип | NULL | Описание |
 |---------|-----|------|---------|
 | `id` | UUID | нет | Первичный ключ |
-| `integration_id` | UUID | да | FK на `active_collab_integrations.id` (nullable для исторических записей) |
-| `external_id` | string | нет | Уникальный ключ строки: `{spreadsheet_id}:{sheet_id}:{row_number}` |
+| `integration_id` | UUID | да | Логическая ссылка на `active_collab_integrations.id`; FK пока отсутствует из-за исторических данных |
+| `record_uuid` | UUID | да | Стабильная идентичность из Sheets, unique вместе с integration_id |
+| `external_id` | string | нет | Текущий неуникальный локатор `{spreadsheet_id}:{sheet_id}:{row_number}` |
 | `spreadsheet_id` | string | нет | ID Google Sheets таблицы |
 | `sheet_id` | string | нет | ID листа |
 | `row_number` | integer | нет | Номер строки |
@@ -158,41 +162,12 @@ CREATE TABLE active_collab_task_exports (
 
 ### Жизненный цикл статусов
 
-```
-                     create()
-                        │
-                  createPending()
-                        │
-                        ▼
-                    ┌───────┐
-                    │pending│
-                    └───┬───┘
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-         (успех)             (ошибка)
-              │                   │
-              ▼                   ▼
-          ┌───────┐          ┌────────┐
-          │created│          │ failed │
-          └───┬───┘          └────────┘
-              │
-         update()
-              │
-      ┌───────┴───────┐
-      │               │
- (успех)          (ошибка)
-      │               │
-      ▼               ▼
-  ┌───────┐      ┌────────┐
-  │updated│      │ failed │
-  └───────┘      └────────┘
-```
+Legacy status сохраняется для прежнего UI: pending при новом экспорте, created/updated при подтверждённом успехе, failed при неуспехе. Операционные состояния шага 1.2 приведены ниже; они определяют право отправки независимо от legacy status.
 
 **Правила:**
 - `task_id`, `task_url`, `sync_hash`, `active_collab_payload`, `active_collab_response` заполняются только при переходе в `created` или `updated`.
 - В `failed` всегда записывается `error_message`.
-- Статус `failed` не является терминальным — следующий create-запрос с тем же `external_id` попробует снова.
+- Legacy `status` не разрешает повтор HTTP. Право отправки определяется reservation и `last_attempt_status`; unknown и running блокируют новую отправку, наличие связи блокирует create.
 
 ### Структура source_payload (JSON)
 
@@ -320,7 +295,8 @@ public function integration(): BelongsTo
 | `active_collab_integrations` | `id` | PRIMARY |
 | `active_collab_integrations` | `spreadsheet_id` | UNIQUE |
 | `active_collab_task_exports` | `id` | PRIMARY |
-| `active_collab_task_exports` | `external_id` | UNIQUE |
+| `active_collab_task_exports` | `external_id` | INDEX (неуникальный) |
+| `active_collab_task_exports` | `integration_id, record_uuid` | UNIQUE, nullable UUID до переноса |
 | `active_collab_task_exports` | `integration_id` | INDEX |
 | `script_assets` | `id` | PRIMARY |
 | `script_assets` | `script_key` | UNIQUE |
@@ -332,3 +308,42 @@ public function integration(): BelongsTo
 - `active_collab_api_token` хранится через Laravel `encrypted` cast — значение шифруется с помощью `APP_KEY` перед записью в БД.
 - Токен никогда не возвращается в API-ответах, не попадает в логи и не включается в exception messages.
 - `active_collab_response` в `active_collab_task_exports` хранит сырой ответ AC API. AC не возвращает токены в теле ответа, поэтому это безопасно.
+
+
+## Операционные состояния и история (шаг 1.2)
+
+Новая additive-миграция добавляет к exports nullable поля:
+
+| Поле | Значение |
+| --- | --- |
+| `last_attempt_status` | idle, running, succeeded, failed, unknown; null у ещё не классифицированного legacy-снимка |
+| `binding_status` | unbound, bound, remote_missing (задача недоступна в выбранном контексте) |
+| `operation_id` | UUID последней операции, сохраняется после завершения для корреляции |
+| `lease_expires_at` | Предел владения running-операцией; terminal state очищает lease |
+| `synced_at` | Время подтверждённого нового успеха; для старых данных не выводится из updated_at |
+
+Добавлен неуникальный индекс `(integration_id, task_id)`; global unique external_id заменён неуникальным индексом в шаге 1.4 после переключения алгоритма. Nullable legacy integration ID и осиротевшие строки не исправляются автоматически.
+
+`active_collab_sync_attempts`: UUID primary key, export ID (FK restrict delete), integration ID, уникальный operation UUID, action, status, started/finished timestamps, nullable http_status/error_code/error_message, очищенные source_payload/active_collab_payload/active_collab_response и sync_hash. Action vocabulary: create/update/skip/reconcile; записываются create/update и административный reconcile. Status: running/succeeded/failed/unknown. FK на integration не добавлен из-за исторических orphan данных.
+
+Подтверждённые task ID/URL, payload/response и hash на экспорте меняются только при succeeded. Каждая новая попытка отдельно хранит свой source и подготовленный payload/hash. Успешный response ограничен `single.id/url_path`; токены и auth headers в историю не входят. Старый полный upstream snapshot не дополняется вымышленной историей.
+
+Команда `integrations:backfill-sync-state --dry-run` показывает классификацию и ID для сверки без записи. Без флага применяет классификацию только к nullable состояниям без operation ID. Полная связь при created/updated → succeeded/bound; pending/failed и неполный снимок → unknown, binding вычисляется по фактической полноте ID/URL. Повторный запуск не меняет уже классифицированные/работающие операции.
+
+
+## admin_audit_logs (шаг 1.3)
+
+Additive-миграция `2026_10_30_000001` создаёт UUID primary key, nullable actor_id (BIGINT FK users, nullOnDelete), subject_type/UUID subject_id, nullable integration_id/connection_id, action, request_id UUID, индексированный operation_id UUID, phase, JSON before/after/context и created_at. Unique `(request_id, phase)` допускает только requested/result для одного решения.
+
+Repository добавляет записи, не редактирует их. Before/after содержит только task ID/очищенный URL, состояния и operation ID; context содержит короткую очищенную причину и IDs назначения/источника. Source/AC body, headers, токены и их encrypted values не входят в audit. Connection context пока null, отдельная Connection модель появится позже. Удаление actor сохраняет audit с null actor ID.
+
+Reconcile attempt не переписывает исходную unknown историю. При успешном bind новой задачи текущие confirmed payload/response/hash/synced_at не переносятся от другой цели. При verify той же задачи исторический confirmed snapshot и synced_at сохраняются, hash инвалидируется для следующего PUT. История и audit сохраняют основание смены связи; получить task по GET недостаточно для выставления времени успешной синхронизации.
+
+
+## Стабильная идентичность (шаг 1.4)
+
+Миграция `2026_10_30_000002_add_record_identity_to_active_collab_exports_and_integrations.php` добавляет nullable UUID и unique `ac_exports_integration_record_unique`, а также uuid_only default false. Миграция `2026_10_30_000003_replace_external_id_unique_with_index_on_active_collab_task_exports.php` снимает global locator unique. Данные не переносятся внутри миграций.
+
+Перенос меняет только UUID и текущие locator-поля. Task-связь, confirmed source/payload/response/hash, sync operation, статусы и synced_at сохраняются; старые attempts не дополняются выдуманными данными. Новые экспорты требуют integration ID, исторические null/orphan записи сохраняются и требуют сверки.
+
+Admin audit использует атомарные действия `record_uuid_bound` и `record_uuid_enabled` с phase=result, без фиктивного sync attempt. Batch UUID в operation_id коррелирует административный перенос, не заменяет export.operation_id. Before/after — идентификаторы/locator либо readiness; context — очищенная причина и project ID. Повтор идентичного переноса не создаёт новый аудит. Down отказывается удалять UUID/readiness или восстанавливать global unique при конфликтующих данных; процедура — DEPLOY.

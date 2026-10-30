@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Repositories\ActiveCollab;
 
+use App\Exceptions\ActiveCollabRequestException;
 use App\Models\ActiveCollabIntegration;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -18,11 +20,11 @@ class ActiveCollabRepository
      */
     public function createTask(ActiveCollabIntegration $integration, array $payload): array
     {
-        return $this->requestWithIntegration(
+        return $this->taskResponse($this->requestWithIntegration(
             $integration, 'post',
             "/projects/{$integration->active_collab_project_id}/tasks",
             $payload,
-        )->json();
+        ));
     }
 
     /**
@@ -31,11 +33,26 @@ class ActiveCollabRepository
      */
     public function updateTask(ActiveCollabIntegration $integration, int $taskId, array $payload): array
     {
-        return $this->requestWithIntegration(
+        return $this->taskResponse($this->requestWithIntegration(
             $integration, 'put',
             "/projects/{$integration->active_collab_project_id}/tasks/{$taskId}",
             $payload,
-        )->json();
+        ), $taskId);
+    }
+
+    /** @return array{single: array{id: int, url_path: string, project_id: int, is_trashed: bool}} */
+    public function getTask(ActiveCollabIntegration $integration, int $taskId): array
+    {
+        $response = $this->requestWithIntegration($integration, 'get',
+            "/projects/{$integration->active_collab_project_id}/tasks/{$taskId}");
+        $binding = $this->taskResponse($response, $taskId);
+        $projectId = $response->json('single.project_id');
+        $trashed = $response->json('single.is_trashed');
+        if ($projectId !== $integration->active_collab_project_id || ! is_bool($trashed)) {
+            throw new ActiveCollabRequestException($response->status());
+        }
+
+        return ['single' => $binding['single'] + ['project_id' => $projectId, 'is_trashed' => $trashed]];
     }
 
     /** @return array<string, mixed> */
@@ -117,31 +134,45 @@ class ActiveCollabRepository
         array $payload = [],
     ): Response {
         $client = Http::withHeader('X-Angie-AuthApiToken', $apiToken)
-            ->acceptJson();
+            ->acceptJson()
+            ->connectTimeout(max(1, (int) config('services.active_collab.connect_timeout', 5)))
+            ->timeout(max(1, (int) config('services.active_collab.timeout', 30)));
 
         return $this->send($client, $method, rtrim($baseUrl, '/').$path, $payload);
+    }
+
+    /** @return array{single: array{id: int, url_path: string}} */
+    private function taskResponse(Response $response, ?int $expectedId = null): array
+    {
+        $single = $response->json('single');
+        if (! is_array($single) || ! is_int($single['id'] ?? null) || $single['id'] < 1
+            || ! is_string($single['url_path'] ?? null) || ! str_starts_with($single['url_path'], '/')
+            || str_starts_with($single['url_path'], '//') || str_contains($single['url_path'], '\\')
+            || preg_match('/[\x00-\x20\x7f]/', $single['url_path'])
+            || ($expectedId !== null && $single['id'] !== $expectedId)) {
+            throw new ActiveCollabRequestException($response->status());
+        }
+
+        return ['single' => ['id' => $single['id'], 'url_path' => $single['url_path']]];
     }
 
     /** @param array<string, mixed> $payload */
     private function send(PendingRequest $client, string $method, string $url, array $payload): Response
     {
-        $response = match ($method) {
-            'get' => $client->get($url),
-            'post' => $client->post($url, $payload),
-            'put' => $client->put($url, $payload),
-            default => throw new \InvalidArgumentException("Unsupported HTTP method: {$method}"),
-        };
-
-        if ($response->failed()) {
-            Log::error('ActiveCollab API error', [
-                'method' => strtoupper($method),
-                'url' => $url,
-                'status' => $response->status(),
-                'body' => mb_substr($response->body(), 0, 500),
-            ]);
+        try {
+            $response = match ($method) {
+                'get' => $client->get($url),
+                'post' => $client->post($url, $payload),
+                'put' => $client->put($url, $payload),
+                default => throw new \InvalidArgumentException('Unsupported HTTP method.'),
+            };
+        } catch (ConnectionException $e) {
+            throw new ActiveCollabRequestException(timeout: str_contains($e->getMessage(), 'cURL error 28'), category: 'transport_uncertain');
         }
-
-        $response->throw();
+        if ($response->failed()) {
+            Log::warning('ActiveCollab API request failed', ['method' => strtoupper($method), 'status' => $response->status()]);
+            throw new ActiveCollabRequestException($response->status(), category: $response->clientError() ? 'upstream_rejected' : 'upstream_uncertain');
+        }
 
         return $response;
     }

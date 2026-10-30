@@ -17,6 +17,7 @@ class StoreActiveCollabTaskRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'record_uuid' => ['nullable', 'uuid'],
             'spreadsheet_id' => ['required', 'string'],
             'sheet_id' => ['required', 'string'],
             'row_number' => ['required', 'integer', 'min:1'],
@@ -39,6 +40,10 @@ class StoreActiveCollabTaskRequest extends FormRequest
     #[\Override]
     protected function prepareForValidation(): void
     {
+        if (is_string($this->input('record_uuid'))) {
+            $this->merge(['record_uuid' => strtolower(trim($this->input('record_uuid'))) ?: null]);
+        }
+
         $spreadsheetId = (string) $this->input('spreadsheet_id', '');
 
         if (preg_match('#/spreadsheets/d/([a-zA-Z0-9_-]+)#', $spreadsheetId, $matches) === 1) {

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Data\ActiveCollab;
 
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
+
 readonly class ActiveCollabTaskData
 {
     public function __construct(
@@ -24,6 +27,7 @@ readonly class ActiveCollabTaskData
         public ?string $responsible,
         public ?string $reporter,
         public ?string $sheetStatus,
+        public ?string $recordUuid = null,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -51,13 +55,40 @@ readonly class ActiveCollabTaskData
             responsible: $data['responsible'] ?? null,
             reporter: $data['reporter'] ?? null,
             sheetStatus: $data['status'] ?? null,
+            recordUuid: empty($data['record_uuid']) ? null : strtolower($data['record_uuid']),
         );
+    }
+
+    /** @param array<string, mixed> $source */
+    public static function fromStoredPayload(array $source): self
+    {
+        $input = $source;
+        $input['description'] = $source['problem_description'] ?? null;
+        $input['screenshot'] = $source['screenshot_url'] ?? null;
+        $input['status'] = $source['sheet_status'] ?? null;
+        $rules = [];
+        foreach (['spreadsheet_id', 'sheet_id', 'environment', 'section', 'description'] as $field) {
+            $rules[$field] = ['required', 'string'];
+            if (is_string($input[$field] ?? null) && str_contains($input[$field], '[REDACTED]')) {
+                throw ValidationException::withMessages(['source' => 'Источник очищен или неполон. Отправьте корректные данные из Sheets.']);
+            }
+        }
+        $rules['record_uuid'] = ['nullable', 'uuid'];
+        $rules['row_number'] = ['required', 'integer', 'min:1'];
+        foreach (['severity', 'priority', 'device', 'resolution', 'screenshot', 'comment', 'task_type', 'responsible', 'reporter', 'status'] as $field) {
+            $rules[$field] = ['nullable', 'string'];
+        }
+
+        $rules['screenshot'] = ['nullable', 'url'];
+
+        return self::fromRequest(Validator::make($input, $rules)->validate());
     }
 
     /** @return array<string, mixed> */
     public function toArray(): array
     {
         return [
+            'record_uuid' => $this->recordUuid,
             'external_id' => $this->externalId,
             'spreadsheet_id' => $this->spreadsheetId,
             'sheet_id' => $this->sheetId,

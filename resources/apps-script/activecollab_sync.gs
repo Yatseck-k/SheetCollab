@@ -1,227 +1,259 @@
-
-// Имена заголовков колонок в таблице (используются как ключи для поиска нужного столбца)
+// UUID travels with the FULL row, including this hidden technical column.
+// Before using this version, complete the inactive integration's UUID migration.
 const COL = {
-  LINK:        'Ссылка на задачу',
-  SEVERITY:    'Серьезность',
-  ENV:         'Стенд',
-  SECTION:     'Раздел',
-  DESCRIPTION: 'Описание проблемы',
-  PRIORITY:    'Приоритет',
-  DEVICE:      'Устройство',
-  RESOLUTION:  'Разрешение',
-  SCREENSHOT:  'Скриншот (ссылка)',
-  SCREENSHOT2: 'Скриншот(ссылка)',  // альтернативное написание заголовка, проверяется как запасной вариант
-  COMMENT:     'Комментарий',
-  TASK_TYPE:   'Тип задач',
-  RESPONSIBLE: 'Ответственный',
-  REPORTER:    'Постановщик',
-  STATUS:      'Статус',
-  ERROR:       'Ошибка синхронизации',
-  SYNC_DATE:   'Дата синхронизации',
+  UUID: 'SheetCollab UUID', LINK: 'Ссылка на задачу', SEVERITY: 'Серьезность',
+  ENV: 'Стенд', SECTION: 'Раздел', DESCRIPTION: 'Описание проблемы', PRIORITY: 'Приоритет',
+  DEVICE: 'Устройство', RESOLUTION: 'Разрешение', SCREENSHOT: 'Скриншот (ссылка)', SCREENSHOT2: 'Скриншот(ссылка)',
+  COMMENT: 'Комментарий', TASK_TYPE: 'Тип задач', RESPONSIBLE: 'Ответственный', REPORTER: 'Постановщик',
+  STATUS: 'Статус', ERROR: 'Ошибка синхронизации', SYNC_DATE: 'Дата синхронизации',
 };
-
-const HTTP_CONFLICT  = 409;
-const HTTP_NOT_FOUND = 404;
-const HTTP_OK_MIN    = 200;  // успешные коды: [200, 300)
-const HTTP_OK_MAX    = 300;
-
-// Сколько строк сверху просматривать при поиске заголовка таблицы
 const HEADER_SEARCH_ROWS = 10;
-
 const TASKS_API_PATH = '/api/integrations/activecollab/tasks';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// ── Точки входа (привязаны к меню) ───────────────────────────────────────────
+function createTaskFromRow() { sendRow('post'); }
+function updateTaskFromRow() { sendRow('put'); }
 
-/**
- * Создаёт задачу в ActiveCollab по данным из активной строки таблицы.
- * Вызывается через меню «ActiveCollab → Создать задачу».
- */
-function createTaskFromRow() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  const { col, activeRow } = resolveSheetContext(sheet);
-  if (!col || !activeRow) return;
-
-  // Колонка для ссылки должна присутствовать в таблице
-  if (!col[COL.LINK]) {
-    SpreadsheetApp.getUi().alert('В таблице отсутствует колонка «Ссылка на задачу». Добавьте её после колонки «Статус».');
-    return;
-  }
-
-  // Если ссылка уже есть — задача уже создана, повторно не создаём
-  const existingLink = sheet.getRange(activeRow, col[COL.LINK]).getValue();
-  if (existingLink) {
-    SpreadsheetApp.getUi().alert('Задача уже создана. Для обновления используйте «Обновить задачу».');
-    return;
-  }
-
-  const payload = buildPayload(sheet, activeRow, col);
-  if (!payload) return;
-
-  const { serviceUrl, serviceToken } = getServiceConfig();
-  if (!serviceUrl) return;
-
-  const { code, result, networkError } = fetchApi(serviceUrl + TASKS_API_PATH, 'post', serviceToken, payload);
-  if (networkError) {
-    writeError(sheet, activeRow, col, networkError);
-    SpreadsheetApp.getUi().alert('Ошибка сети: ' + networkError);
-    return;
-  }
-
-  // 409 — задача уже существует на сервере (например, создана не через таблицу)
-  if (code === HTTP_CONFLICT) {
-    const taskUrl = result && result.data ? result.data.task_url : null;
-    if (taskUrl) writeTaskLink(sheet, activeRow, col, taskUrl);
-    SpreadsheetApp.getUi().alert('Задача уже создана.\n' + (taskUrl || ''));
-    return;
-  }
-
-  // 404 — интеграционный сервис не знает об этой таблице
-  if (code === HTTP_NOT_FOUND) {
-    SpreadsheetApp.getUi().alert('Интеграция не настроена для этой таблицы. Обратитесь к администратору.');
-    return;
-  }
-
-  if (handleCommonErrors(sheet, activeRow, col, code, result)) return;
-
-  const taskId  = result.data.task_id;
-  const taskUrl = result.data.task_url;
-
-  writeTaskLink(sheet, activeRow, col, taskUrl);
-  writeError(sheet, activeRow, col, '');  // очищаем предыдущую ошибку, фиксируем дату синхронизации
-  SpreadsheetApp.getUi().alert('Задача создана!\nID: ' + taskId + '\n' + taskUrl);
+function withDocumentLock(callback) {
+  const lock = LockService.getDocumentLock();
+  if (!lock || !lock.tryLock(5000)) throw new Error('Таблица занята. Повторите действие после завершения другого запуска.');
+  try { return callback(); } finally { lock.releaseLock(); }
 }
 
-/**
- * Обновляет существующую задачу в ActiveCollab данными из активной строки.
- * Вызывается через меню «ActiveCollab → Обновить задачу».
- */
-function updateTaskFromRow() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  const { col, activeRow } = resolveSheetContext(sheet);
-  if (!col || !activeRow) return;
-
-  if (!col[COL.LINK]) {
-    SpreadsheetApp.getUi().alert('В таблице отсутствует колонка «Ссылка на задачу».');
-    return;
+function sendRow(method) {
+  try {
+    const config = getServiceConfig();
+    const prepared = withDocumentLock(() => {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+      const context = sheetContext(sheet);
+      if (!context) throw new Error('Строка заголовков не найдена.');
+      const row = sheet.getActiveRange().getRow();
+      if (row <= context.headerRow) throw new Error('Выберите строку с данными.');
+      requireColumns(context.col);
+      ensureUuidColumn(sheet, context);
+      // Re-read after the document lock was acquired, never replace an existing identity.
+      const uuid = ensureRowUuid(sheet, row, context.col);
+      SpreadsheetApp.flush();
+      if (findUuidRows(uuid).length !== 1) throw new Error('Дубликат SheetCollab UUID. Для копии выполните «Новая запись из копии».');
+      const link = sheet.getRange(row, context.col[COL.LINK]).getValue();
+      const taskId = parseTaskId(taskLinkUrl(sheet, row, context.col));
+      if (method === 'post' && link) throw new Error('Ссылка уже есть. Используйте «Обновить задачу».');
+      if (method === 'put' && !taskId) throw new Error('Нет корректной ссылки на задачу. Проверьте существующую привязку.');
+      const payload = buildPayload(sheet, row, context.col);
+      payload.record_uuid = uuid;
+      return { uuid, taskId, payload };
+    });
+    const endpoint = config.serviceUrl + TASKS_API_PATH + (method === 'put' ? '/' + prepared.taskId : '');
+    const response = fetchApi(endpoint, method, config.serviceToken, prepared.payload);
+    const data = response.result && response.result.data;
+    const validTask = data && Number.isSafeInteger(data.task_id) && data.task_id > 0
+      && parseTaskId(data.task_url) === data.task_id && (method !== 'put' || data.task_id === prepared.taskId);
+    const duplicate = method === 'post' && response.code === 409 && response.result && !response.result.error && validTask;
+    const success = response.code >= 200 && response.code < 300 && validTask;
+    let message = '';
+    if (!success && !duplicate) {
+      message = response.networkError || (response.result && response.result.error && response.result.error.message)
+        || (response.result && response.result.message) || ('Некорректный ответ сервера (HTTP ' + response.code + ').');
+      message = String(message).split(config.serviceToken).join('[REDACTED]').slice(0, 1000);
+    }
+    withDocumentLock(() => {
+      const matches = findUuidRows(prepared.uuid);
+      if (matches.length !== 1) throw new Error('Строка удалена или UUID продублирован. Ответ не записан; проверьте историю сервиса.');
+      const target = matches[0];
+      requireColumns(target.col);
+      if (String(target.sheet.getRange(target.row, target.col[COL.UUID]).getValue()).trim().toLowerCase() !== prepared.uuid) {
+        throw new Error('Строка изменилась перед записью ответа. Проверьте историю сервиса.');
+      }
+      if (success || duplicate) writeTaskLink(target.sheet, target.row, target.col, data.task_url);
+      writeError(target.sheet, target.row, target.col, message);
+      SpreadsheetApp.flush();
+    });
+    SpreadsheetApp.getUi().alert(message || (duplicate ? 'Задача уже создана.\n' : 'Готово.\n') + data.task_url);
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(error.message);
   }
-
-  // ID задачи извлекается из гиперссылки, сохранённой в ячейке LINK
-  const taskId = extractTaskId(sheet, activeRow, col);
-  if (!taskId) {
-    SpreadsheetApp.getUi().alert('Задача ещё не создана. Используйте «Создать задачу».');
-    return;
-  }
-
-  const payload = buildPayload(sheet, activeRow, col);
-  if (!payload) return;
-
-  const { serviceUrl, serviceToken } = getServiceConfig();
-  if (!serviceUrl) return;
-
-  const { code, result, networkError } = fetchApi(serviceUrl + TASKS_API_PATH + '/' + taskId, 'put', serviceToken, payload);
-  if (networkError) {
-    writeError(sheet, activeRow, col, networkError);
-    SpreadsheetApp.getUi().alert('Ошибка сети: ' + networkError);
-    return;
-  }
-
-  // 404 — задача удалена из ActiveCollab после того, как была создана через таблицу
-  if (code === HTTP_NOT_FOUND) {
-    SpreadsheetApp.getUi().alert('Задача #' + taskId + ' не найдена в ActiveCollab.');
-    return;
-  }
-
-  if (handleCommonErrors(sheet, activeRow, col, code, result)) return;
-
-  writeError(sheet, activeRow, col, '');  // очищаем предыдущую ошибку, фиксируем дату синхронизации
-  SpreadsheetApp.getUi().alert('Задача #' + taskId + ' обновлена!\n' + result.data.task_url);
 }
 
-// ── Вспомогательные функции ───────────────────────────────────────────────────
-
-/**
- * Выполняет HTTP-запрос к интеграционному сервису.
- * Возвращает { code, result } при успехе или { networkError } при исключении сети.
- */
 function fetchApi(url, method, token, body) {
   try {
     const response = UrlFetchApp.fetch(url, {
-      method:             method,
-      contentType:        'application/json',
-      headers:            { 'Authorization': 'Bearer ' + token },
-      payload:            JSON.stringify(body),
-      muteHttpExceptions: true,  // GAS не бросает исключение на 4xx/5xx — код проверяем сами
+      method, contentType: 'application/json', headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify(body), muteHttpExceptions: true,
     });
-    return { code: response.getResponseCode(), result: safeJson(response.getContentText()) };
-  } catch (e) {
-    return { networkError: e.message };
+    let result = null;
+    try { result = JSON.parse(response.getContentText()); } catch (_) { /* Invalid success is not a confirmed result. */ }
+    return { code: response.getResponseCode(), result };
+  } catch (_) {
+    // Exception text can contain credentials or request details; never display it.
+    return { networkError: 'Сетевая ошибка. Результат не подтверждён; проверьте историю сервиса перед повтором.' };
   }
 }
 
-/** JSON.parse с возвратом null при ошибке — устраняет повторный try/catch в вызывающем коде. */
-function safeJson(text) {
-  try { return JSON.parse(text); } catch (_) { return null; }
+function sheetContext(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (!lastCol) return null;
+  const rows = sheet.getRange(1, 1, Math.min(HEADER_SEARCH_ROWS, sheet.getMaxRows()), lastCol).getValues();
+  const index = rows.findIndex(row => row.some(cell => String(cell).trim() === COL.SEVERITY));
+  if (index < 0) {
+    if (rows.some(row => row.some(cell => String(cell).trim() === COL.UUID))) throw new Error('Лист с UUID не содержит корректных заголовков.');
+    return null;
+  }
+  const col = Object.create(null);
+  rows[index].forEach((header, i) => {
+    const name = String(header).trim();
+    if (!name) return;
+    if (col[name]) throw new Error('Повторяющийся заголовок: ' + name);
+    col[name] = i + 1;
+  });
+  return { col, headerRow: index + 1 };
 }
 
-/**
- * Обрабатывает все не-2xx ответы и некорректные тела ответа.
- * Возвращает true, если обнаружена ошибка (вызывающий должен прервать выполнение).
- */
-function handleCommonErrors(sheet, row, col, code, result) {
-  if (code < HTTP_OK_MIN || code >= HTTP_OK_MAX) {
-    const msg = result && result.message ? result.message : 'HTTP ' + code;
-    writeError(sheet, row, col, msg);
-    SpreadsheetApp.getUi().alert('Ошибка: ' + msg);
-    return true;
+function requireColumns(col) {
+  for (const name of [COL.ENV, COL.SECTION, COL.DESCRIPTION, COL.LINK]) {
+    if (!col[name]) throw new Error('Отсутствует колонка «' + name + '».');
   }
-  if (!result || !result.data) {
-    writeError(sheet, row, col, 'Некорректный ответ сервера');
-    SpreadsheetApp.getUi().alert('Ошибка: сервер вернул некорректный ответ');
-    return true;
-  }
-  return false;
 }
 
-/**
- * Сканирует первые HEADER_SEARCH_ROWS строк в поисках строки заголовков
- * (определяется по наличию ячейки COL.SEVERITY), затем строит карту
- * «имя колонки → 1-based индекс столбца».
- * Также проверяет, что активная ячейка находится ниже строки заголовков.
- */
-function resolveSheetContext(sheet) {
-  const lastCol     = sheet.getLastColumn();
-  const searchRange = sheet.getRange(1, 1, HEADER_SEARCH_ROWS, lastCol).getValues();
-
-  let headerRowIndex = -1;
-  for (let i = 0; i < searchRange.length; i++) {
-    if (searchRange[i].some(cell => String(cell).trim() === COL.SEVERITY)) {
-      headerRowIndex = i;
-      break;
-    }
+function ensureUuidColumn(sheet, context) {
+  if (!context.col[COL.UUID]) {
+    const column = sheet.getLastColumn() + 1;
+    if (column > sheet.getMaxColumns()) sheet.insertColumnAfter(sheet.getMaxColumns());
+    sheet.getRange(context.headerRow, column).setValue(COL.UUID);
+    context.col[COL.UUID] = column;
   }
-
-  if (headerRowIndex === -1) {
-    SpreadsheetApp.getUi().alert('Строка заголовков не найдена');
-    return { col: null, activeRow: null };
-  }
-
-  // Строим карту: имя заголовка → 1-based номер столбца
-  const col = {};
-  searchRange[headerRowIndex].forEach((h, i) => { if (h) col[String(h).trim()] = i + 1; });
-
-  const activeRow = sheet.getActiveRange().getRow();
-  if (activeRow <= headerRowIndex + 1) {
-    SpreadsheetApp.getUi().alert('Выберите строку с данными (не заголовок)');
-    return { col: null, activeRow: null };
-  }
-
-  return { col, activeRow };
+  sheet.hideColumns(context.col[COL.UUID]);
 }
 
-/**
- * Читает все нужные ячейки из activeRow и формирует тело API-запроса.
- * Возвращает null, если хотя бы одно из обязательных полей (ENV, SECTION, DESCRIPTION) пусто.
- */
+function ensureRowUuid(sheet, row, col) {
+  const cell = sheet.getRange(row, col[COL.UUID]);
+  let uuid = String(cell.getValue()).trim();
+  if (!uuid) { uuid = Utilities.getUuid().toLowerCase(); cell.setValue(uuid); }
+  if (!UUID_PATTERN.test(uuid)) throw new Error('Некорректный SheetCollab UUID. Не меняйте идентификатор существующей записи.');
+  return uuid.toLowerCase();
+}
+
+// Scan the whole spreadsheet, since a row can move to a different tab during HTTP.
+function findUuidRows(uuid) {
+  return uuidRows().filter(target => target.uuid === uuid);
+}
+
+function uuidRows() {
+  const rows = [];
+  for (const sheet of SpreadsheetApp.getActiveSpreadsheet().getSheets()) {
+    const context = sheetContext(sheet);
+    if (!context || !context.col[COL.UUID]) continue;
+    const count = sheet.getLastRow() - context.headerRow;
+    if (count <= 0) continue;
+    sheet.getRange(context.headerRow + 1, context.col[COL.UUID], count, 1).getValues().forEach((cells, i) => {
+      const uuid = String(cells[0]).trim().toLowerCase();
+      if (!uuid) return;
+      if (!UUID_PATTERN.test(uuid)) throw new Error('Некорректный UUID в таблице. Требуется ручная сверка.');
+      rows.push({ sheet, col: context.col, row: context.headerRow + 1 + i, uuid });
+    });
+  }
+  return rows;
+}
+
+function newRecordFromCopy() {
+  const ui = SpreadsheetApp.getUi();
+  if (ui.alert('Новая запись из копии', 'Назначить выбранной строке новый UUID и очистить ссылку? Это позволит создать отдельную задачу.', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  try {
+    withDocumentLock(() => {
+      const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+      const context = sheetContext(sheet);
+      if (!context) throw new Error('Строка заголовков не найдена.');
+      const row = sheet.getActiveRange().getRow();
+      if (row <= context.headerRow) throw new Error('Выберите строку с данными.');
+      requireColumns(context.col);
+      ensureUuidColumn(sheet, context);
+      sheet.getRange(row, context.col[COL.UUID]).setValue(Utilities.getUuid().toLowerCase());
+      for (const name of [COL.LINK, COL.ERROR, COL.SYNC_DATE]) {
+        if (context.col[name]) sheet.getRange(row, context.col[name]).clearContent();
+      }
+      SpreadsheetApp.flush();
+    });
+  } catch (error) { ui.alert(error.message); }
+}
+
+function prepareUuidMigration() {
+  try {
+    const manifest = withDocumentLock(() => {
+      const records = [];
+      for (const sheet of SpreadsheetApp.getActiveSpreadsheet().getSheets()) {
+        const context = sheetContext(sheet);
+        if (!context) continue;
+        requireColumns(context.col);
+        ensureUuidColumn(sheet, context);
+        const count = sheet.getLastRow() - context.headerRow;
+        if (count <= 0) continue;
+        const values = sheet.getRange(context.headerRow + 1, 1, count, sheet.getLastColumn()).getValues();
+        values.forEach((cells, i) => {
+          if (!Object.values(COL).some(name => context.col[name] && String(cells[context.col[name] - 1] || '').trim())) return;
+          const row = context.headerRow + 1 + i;
+          const uuid = ensureRowUuid(sheet, row, context.col);
+          const linkValue = sheet.getRange(row, context.col[COL.LINK]).getValue();
+          const taskUrl = taskLinkUrl(sheet, row, context.col);
+          const taskId = parseTaskId(taskUrl);
+          if (linkValue && !taskId) throw new Error('Некорректная task-ссылка. Сверьте её перед переносом.');
+          records.push({ record_uuid: uuid, sheet_id: String(sheet.getSheetId()), row_number: row, task_id: taskId, task_url: taskUrl || null });
+        });
+      }
+      SpreadsheetApp.flush();
+      const seen = new Set();
+      for (const target of uuidRows()) {
+        if (seen.has(target.uuid)) throw new Error('Дубликат UUID. Сверьте копии до переноса.');
+        seen.add(target.uuid);
+      }
+      if (records.length > 20000) throw new Error('Манифест превышает 20 000 строк. Требуется отдельный план переноса.');
+      return { version: 1, spreadsheet_id: SpreadsheetApp.getActiveSpreadsheet().getId(), records };
+    });
+    const json = JSON.stringify(manifest, null, 2);
+    const escaped = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const html = HtmlService.createHtmlOutput('<p>Сохраните JSON локально. Перед переносом остановите синхронизацию и редактирование таблицы.</p><textarea readonly style="width:98%;height:80%">' + escaped + '</textarea>').setWidth(800).setHeight(600);
+    SpreadsheetApp.getUi().showModalDialog(html, 'Манифест UUID для администратора');
+  } catch (error) { SpreadsheetApp.getUi().alert(error.message); }
+}
+
+function taskLinkUrl(sheet, row, col) {
+  if (!col[COL.LINK]) return '';
+  const cell = sheet.getRange(row, col[COL.LINK]);
+  const rich = cell.getRichTextValue();
+  return (rich && rich.getLinkUrl()) || String(cell.getValue()).trim();
+}
+
+function parseTaskId(url) {
+  if (typeof url !== 'string') return null;
+  const match = url.match(/^https?:\/\/[^?#\s]+\/projects\/[1-9]\d*\/tasks\/([1-9]\d*)\/?$/);
+  const id = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function getServiceConfig() {
+  const props = PropertiesService.getScriptProperties();
+  const serviceUrl = props.getProperty('INTEGRATION_SERVICE_URL');
+  const serviceToken = props.getProperty('INTEGRATION_SERVICE_TOKEN');
+  if (!serviceUrl || !serviceToken) throw new Error('Настройте INTEGRATION_SERVICE_URL и INTEGRATION_SERVICE_TOKEN в Script Properties.');
+  return { serviceUrl: serviceUrl.replace(/\/+$/, ''), serviceToken };
+}
+
+function writeTaskLink(sheet, row, col, taskUrl) {
+  sheet.getRange(row, col[COL.LINK]).setRichTextValue(SpreadsheetApp.newRichTextValue().setText('Открыть задачу').setLinkUrl(taskUrl).build());
+}
+
+function writeError(sheet, row, col, message) {
+  if (col[COL.ERROR]) sheet.getRange(row, col[COL.ERROR]).setValue(/^[=+@-]/.test(message) ? "'" + message : message);
+  if (col[COL.SYNC_DATE]) sheet.getRange(row, col[COL.SYNC_DATE]).setValue(new Date().toISOString());
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('ActiveCollab')
+    .addItem('Создать задачу', 'createTaskFromRow')
+    .addItem('Обновить задачу', 'updateTaskFromRow')
+    .addItem('Новая запись из копии', 'newRecordFromCopy')
+    .addItem('Подготовить UUID для переноса', 'prepareUuidMigration')
+    .addToUi();
+}
+
 function buildPayload(sheet, activeRow, col) {
   // Читает ячейку по имени колонки, возвращает обрезанную строку или ''
   const get = (name) => {
@@ -238,8 +270,7 @@ function buildPayload(sheet, activeRow, col) {
   if (!section)     missing.push(COL.SECTION);
   if (!description) missing.push(COL.DESCRIPTION);
   if (missing.length) {
-    SpreadsheetApp.getUi().alert('Не заполнены обязательные поля: ' + missing.join(', '));
-    return null;
+    throw new Error('Не заполнены обязательные поля: ' + missing.join(', '));
   }
 
   const spreadsheetId = SpreadsheetApp.getActiveSpreadsheet().getId();
@@ -264,66 +295,4 @@ function buildPayload(sheet, activeRow, col) {
     reporter:       get(COL.REPORTER)    || null,
     status:         get(COL.STATUS)      || null,
   };
-}
-
-/**
- * Извлекает числовой ID задачи из гиперссылки в ячейке LINK.
- * Ожидаемый формат URL: …/tasks/<id>.
- */
-function extractTaskId(sheet, row, col) {
-  const c = col[COL.LINK];
-  if (!c) return null;
-  const richText = sheet.getRange(row, c).getRichTextValue();
-  const url      = richText ? richText.getLinkUrl() : null;
-  if (!url) return null;
-  const match = url.match(/\/tasks\/(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
-}
-
-/** Читает INTEGRATION_SERVICE_URL и INTEGRATION_SERVICE_TOKEN из Script Properties. */
-function getServiceConfig() {
-  const props        = PropertiesService.getScriptProperties();
-  const serviceUrl   = props.getProperty('INTEGRATION_SERVICE_URL');
-  const serviceToken = props.getProperty('INTEGRATION_SERVICE_TOKEN');
-
-  if (!serviceUrl || !serviceToken) {
-    SpreadsheetApp.getUi().alert('Не настроены Script Properties: INTEGRATION_SERVICE_URL, INTEGRATION_SERVICE_TOKEN');
-    return { serviceUrl: null, serviceToken: null };
-  }
-
-  return { serviceUrl, serviceToken };
-}
-
-/** Записывает гиперссылку «Открыть задачу» в ячейку LINK нужной строки. */
-function writeTaskLink(sheet, row, col, taskUrl) {
-  const c = col[COL.LINK];
-  if (!c) return;
-  const richText = SpreadsheetApp.newRichTextValue()
-    .setText('Открыть задачу')
-    .setLinkUrl(taskUrl)
-    .build();
-  sheet.getRange(row, c).setRichTextValue(richText);
-}
-
-/**
- * Записывает сообщение об ошибке (или '' для очистки) в колонку ERROR
- * и фиксирует текущее время в SYNC_DATE.
- * Вызывается и при ошибке, и при успехе — SYNC_DATE всегда отражает время последней попытки.
- */
-function writeError(sheet, row, col, message) {
-  if (col[COL.ERROR]) {
-    sheet.getRange(row, col[COL.ERROR]).setValue(message);
-  }
-  if (col[COL.SYNC_DATE]) {
-    sheet.getRange(row, col[COL.SYNC_DATE]).setValue(new Date().toISOString());
-  }
-}
-
-/** Добавляет меню «ActiveCollab» при открытии таблицы. */
-function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('ActiveCollab')
-    .addItem('Создать задачу', 'createTaskFromRow')
-    .addItem('Обновить задачу', 'updateTaskFromRow')
-    .addToUi();
 }
