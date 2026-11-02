@@ -5,14 +5,15 @@ const COL = {
   ENV: 'Стенд', SECTION: 'Раздел', DESCRIPTION: 'Описание проблемы', PRIORITY: 'Приоритет',
   DEVICE: 'Устройство', RESOLUTION: 'Разрешение', SCREENSHOT: 'Скриншот (ссылка)', SCREENSHOT2: 'Скриншот(ссылка)',
   COMMENT: 'Комментарий', TASK_TYPE: 'Тип задач', RESPONSIBLE: 'Ответственный', REPORTER: 'Постановщик',
-  STATUS: 'Статус', ERROR: 'Ошибка синхронизации', SYNC_DATE: 'Дата синхронизации',
+  STATUS: 'Статус', ERROR: 'Ошибка синхронизации', SYNC_DATE: 'Дата синхронизации', ATTEMPT_DATE: 'Дата попытки',
 };
 const HEADER_SEARCH_ROWS = 10;
-const TASKS_API_PATH = '/api/integrations/activecollab/tasks';
+const TASKS_API_PATH = '/api/tasks/sync';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function createTaskFromRow() { sendRow('post'); }
-function updateTaskFromRow() { sendRow('put'); }
+function syncTaskFromRow() { sendRow(); }
+function createTaskFromRow() { syncTaskFromRow(); }
+function updateTaskFromRow() { syncTaskFromRow(); }
 
 function withDocumentLock(callback) {
   const lock = LockService.getDocumentLock();
@@ -20,7 +21,7 @@ function withDocumentLock(callback) {
   try { return callback(); } finally { lock.releaseLock(); }
 }
 
-function sendRow(method) {
+function sendRow() {
   try {
     const config = getServiceConfig();
     const prepared = withDocumentLock(() => {
@@ -37,18 +38,19 @@ function sendRow(method) {
       if (findUuidRows(uuid).length !== 1) throw new Error('Дубликат SheetCollab UUID. Для копии выполните «Новая запись из копии».');
       const link = sheet.getRange(row, context.col[COL.LINK]).getValue();
       const taskId = parseTaskId(taskLinkUrl(sheet, row, context.col));
-      if (method === 'post' && link) throw new Error('Ссылка уже есть. Используйте «Обновить задачу».');
-      if (method === 'put' && !taskId) throw new Error('Нет корректной ссылки на задачу. Проверьте существующую привязку.');
+      if (link && !taskId) throw new Error('Нет корректной ссылки на задачу. Проверьте существующую привязку.');
       const payload = buildPayload(sheet, row, context.col);
       payload.record_uuid = uuid;
-      return { uuid, taskId, payload };
+      return { uuid, payload };
     });
-    const endpoint = config.serviceUrl + TASKS_API_PATH + (method === 'put' ? '/' + prepared.taskId : '');
-    const response = fetchApi(endpoint, method, config.serviceToken, prepared.payload);
+    const response = fetchApi(config.serviceUrl + TASKS_API_PATH, 'post', config.serviceToken, prepared.payload);
     const data = response.result && response.result.data;
     const validTask = data && Number.isSafeInteger(data.task_id) && data.task_id > 0
-      && parseTaskId(data.task_url) === data.task_id && (method !== 'put' || data.task_id === prepared.taskId);
-    const duplicate = method === 'post' && response.code === 409 && response.result && !response.result.error && validTask;
+      && parseTaskId(data.task_url) === data.task_id && data.record_uuid === prepared.uuid
+      && ['created', 'updated', 'skipped'].includes(data.action)
+      && /^[0-9a-f]{64}$/.test(data.sync_hash || '') && UUID_PATTERN.test(data.operation_id || '')
+      && Number.isFinite(Date.parse(data.synced_at)) && Number.isFinite(Date.parse(data.attempted_at || data.synced_at));
+    const duplicate = false;
     const success = response.code >= 200 && response.code < 300 && validTask;
     let message = '';
     if (!success && !duplicate) {
@@ -65,10 +67,11 @@ function sendRow(method) {
         throw new Error('Строка изменилась перед записью ответа. Проверьте историю сервиса.');
       }
       if (success || duplicate) writeTaskLink(target.sheet, target.row, target.col, data.task_url);
-      writeError(target.sheet, target.row, target.col, message);
+      writeError(target.sheet, target.row, target.col, message, success ? data.synced_at : null,
+        success ? data.attempted_at || data.synced_at : null);
       SpreadsheetApp.flush();
     });
-    SpreadsheetApp.getUi().alert(message || (duplicate ? 'Задача уже создана.\n' : 'Готово.\n') + data.task_url);
+    SpreadsheetApp.getUi().alert(message || (data.action === 'skipped' ? 'Изменений нет.\n' : 'Синхронизация завершена.\n') + data.task_url);
   } catch (error) {
     SpreadsheetApp.getUi().alert(error.message);
   }
@@ -240,15 +243,15 @@ function writeTaskLink(sheet, row, col, taskUrl) {
   sheet.getRange(row, col[COL.LINK]).setRichTextValue(SpreadsheetApp.newRichTextValue().setText('Открыть задачу').setLinkUrl(taskUrl).build());
 }
 
-function writeError(sheet, row, col, message) {
+function writeError(sheet, row, col, message, syncedAt = null, attemptedAt = null) {
   if (col[COL.ERROR]) sheet.getRange(row, col[COL.ERROR]).setValue(/^[=+@-]/.test(message) ? "'" + message : message);
-  if (col[COL.SYNC_DATE]) sheet.getRange(row, col[COL.SYNC_DATE]).setValue(new Date().toISOString());
+  if (col[COL.SYNC_DATE] && syncedAt) sheet.getRange(row, col[COL.SYNC_DATE]).setValue(syncedAt);
+  if (col[COL.ATTEMPT_DATE] && attemptedAt) sheet.getRange(row, col[COL.ATTEMPT_DATE]).setValue(attemptedAt);
 }
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('ActiveCollab')
-    .addItem('Создать задачу', 'createTaskFromRow')
-    .addItem('Обновить задачу', 'updateTaskFromRow')
+    .addItem('Синхронизировать задачу', 'syncTaskFromRow')
     .addItem('Новая запись из копии', 'newRecordFromCopy')
     .addItem('Подготовить UUID для переноса', 'prepareUuidMigration')
     .addToUi();

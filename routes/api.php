@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Api\ActiveCollabTaskController;
+use App\Http\Controllers\Api\TaskSyncController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('integrations/activecollab')
@@ -14,3 +15,6 @@ Route::prefix('integrations/activecollab')
         Route::get('users', [ActiveCollabTaskController::class, 'users']);
         Route::get('labels', [ActiveCollabTaskController::class, 'labels']);
     });
+
+Route::post('tasks/sync', TaskSyncController::class)
+    ->middleware(['activecollab.limit', 'activecollab.token']);

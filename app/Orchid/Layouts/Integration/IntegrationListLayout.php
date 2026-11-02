@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Orchid\Layouts\Integration;
 
 use App\Models\ActiveCollabIntegration;
+use Illuminate\Support\Facades\Gate;
 use Orchid\Screen\Actions\Button;
 use Orchid\Screen\Actions\DropDown;
 use Orchid\Screen\Actions\Link;
@@ -58,7 +59,8 @@ class IntegrationListLayout extends Table
                         Button::make('Удалить')
                             ->icon('bs.trash3')
                             ->confirm('Удалить интеграцию «'.$i->name.'»? Это действие нельзя отменить.')
-                            ->method('remove', ['id' => $i->id]),
+                            ->method('remove', ['id' => $i->id])
+                            ->canSee(Gate::allows('delete', $i)),
                     ])),
         ];
     }

@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/** @property string|null $hash_version */
 class ActiveCollabTaskExport extends Model
 {
     use HasUuids;
@@ -25,7 +26,7 @@ class ActiveCollabTaskExport extends Model
         'source_payload',
         'active_collab_payload',
         'active_collab_response',
-        'sync_hash',
+        'sync_hash', 'hash_version',
         'status',
         'error_message',
         'last_attempt_status', 'binding_status', 'operation_id', 'lease_expires_at', 'synced_at',

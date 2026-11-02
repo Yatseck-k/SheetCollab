@@ -1,6 +1,6 @@
 # Task Summary
 
-Статус: **этап 2 — конкретный план подготовлен, ожидает одобрения; реализация не начата**.
+Статус: **этап 2 — реализован и проверен 2026-11-02**.
 
 Цель: добавить `POST /api/tasks/sync`, где сервер по UUID и подтверждённому конечному payload выбирает create/update/skip. Apps Script получает одно основное действие. До публикации нового API внедрить индивидуальные токены и проверку контекста интеграции. Основание — TASK §§4.3–6.4, 9–12 и просьба пользователя перейти к следующему этапу.
 
@@ -182,13 +182,17 @@
 
 ## Done Criteria
 
-- [ ] Новый API принимает только individual token, неизменно связан с его интеграцией/таблицей, проверяет отзыв/active до dispatch и завершения.
-- [ ] CLI выдаёт/ротирует/отзывает tokens и управляет legacy allowlist с действующими admin permissions и атомарным безопасным audit.
-- [ ] POST/PUT и references работают только в допустимом контексте; старые success/duplicate envelopes сохранены, исправленные несовместимости описаны.
-- [ ] Конечный payload экранирован и учитывает mappings/source/clear, SHA-256 детерминирован и версионирован; неподтверждённый ответ не создаёт основания skip.
-- [ ] Сервер атомарно выбирает create/update/skip; skip журналируется без POST/PUT и без новой даты/подмены подтверждённого snapshot.
-- [ ] Unknown/remote_missing/recovery/late callback/commit failure не обходятся auto intent или hash; MariaDB гонки проходят.
-- [ ] Apps Script содержит одно основное действие и сохраняет UUID-защиту/response ownership; DB/custom scripts не перезаписаны автоматически.
-- [ ] Fresh/upgrade/guarded rollback проверены отдельно, история 1.4 сохранена, рабочие данные не менялись.
-- [ ] Выполнены PHPUnit/JS/MariaDB/Pint/PHPStan/build/Blade; ограничения Sail/Google/AC и неподтверждённое live clear честно зафиксированы в REPORT-2.
-- [ ] Документы описывают полный labels ownership, global deny/allowlist, token rotation, DB-script переход и безопасный rollback; dependency updates/последующие этапы не смешаны.
+- [x] Новый API принимает только individual token, неизменно связан с его интеграцией/таблицей, проверяет отзыв/active до dispatch и завершения.
+- [x] CLI выдаёт/листает/отзывает tokens и управляет legacy allowlist с действующими admin permissions и безопасным audit.
+- [x] POST/PUT и references работают только в допустимом контексте; старые success/duplicate envelopes сохранены.
+- [x] Конечный payload экранирован и учитывает mappings/source/clear, SHA-256 детерминирован и версионирован; неподтверждённый ответ не создаёт основания skip.
+- [x] Сервер атомарно выбирает create/update/skip; skip журналируется без POST/PUT и без новой даты/подмены подтверждённого snapshot.
+- [x] Unknown/remote_missing/recovery/late callback/commit failure не обходятся auto intent или hash; MariaDB гонки проходят.
+- [x] Apps Script содержит одно основное действие и сохраняет UUID-защиту/response ownership; DB/custom scripts не перезаписывались автоматически.
+- [x] Fresh/upgrade/guarded rollback проверены отдельно, история 1.4 сохранена; рабочие данные не менялись.
+- [x] Выполнены PHPUnit/JS/MariaDB/Pint/PHPStan/build/Blade; ограничения Sail/Google/AC и неподтверждённое live clear записаны в REPORT-2.
+- [x] Документы описывают полный labels ownership, global deny/allowlist, token rotation, DB-script переход и безопасный rollback; dependency updates/последующие этапы не смешаны.
+
+## Итог проверки 2026-11-02
+
+Подробные причины, список файлов, команды, результаты и ограничения: [`work/REPORT-2.md`](REPORT-2.md). SQLite suite: 249 tests / 913 assertions, 0 failures, 11 существующих PHPUnit Notices, 14 MariaDB-only tests skipped штатным запуском. Изолированный MariaDB concurrency suite: 14 tests / 145 assertions, все прошли. Apps Script harness: 19/19. Pint: 143 files clean; PHPStan: 104 files, no errors; Vite build и Blade cache/clear прошли. Изолированная upgrade/rollback проверка сохранила legacy history и подтвердила guards. Реальный ActiveCollab/Google Sheets QA и production rollout не выполнялись.

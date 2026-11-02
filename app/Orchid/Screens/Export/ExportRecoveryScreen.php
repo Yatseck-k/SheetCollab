@@ -104,7 +104,7 @@ class ExportRecoveryScreen extends Screen
         $lines = [];
         foreach ($attempts as $attempt) {
             $action = match ($attempt['action']) {
-                'create' => 'Создание', 'update' => 'Обновление', 'reconcile' => 'Восстановление', default => 'Проверка'
+                'create' => 'Создание', 'update' => 'Обновление', 'skip' => 'Без изменений', 'reconcile' => 'Восстановление', default => 'Проверка'
             };
             $status = match ($attempt['status']) {
                 'running' => 'Выполняется', 'succeeded' => 'Успешно', 'failed' => 'Ошибка', default => 'Требуется сверка'
@@ -117,7 +117,8 @@ class ExportRecoveryScreen extends Screen
                 'pre_dispatch_failed' => 'Отправка не началась', 'sync_outcome_unknown' => 'Результат не подтверждён', default => '',
             };
             $http = isset($attempt['http_status']) ? ' (HTTP '.(int) $attempt['http_status'].')' : '';
-            $lines[] = $date.' — '.$action.': '.$status.($reason !== '' ? '. '.$reason : '').$http;
+            $candidate = isset($attempt['candidate_task_id']) ? ' Получен кандидат #'.(int) $attempt['candidate_task_id'].': '.($attempt['candidate_task_url'] ?? '').'. Требуется проверка связи.' : '';
+            $lines[] = $date.' — '.$action.': '.$status.($reason !== '' ? '. '.$reason : '').$http.$candidate;
         }
 
         return $lines === [] ? 'Попыток пока нет.' : implode("\n", $lines);

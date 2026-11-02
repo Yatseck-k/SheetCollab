@@ -1,5 +1,7 @@
 # API Reference
 
+> Актуальный контракт этапа 2 описан в разделе «Единый sync API» ниже. Прежние POST/PUT и глобальная авторизация сохранены только для совместимости и требуют явного `allow_legacy_token` на интеграции.
+
 ## Общее
 
 Все API-маршруты находятся под префиксом:
@@ -9,6 +11,18 @@
 ```
 
 Все маршруты защищены middleware `VerifyIntegrationToken`.
+
+## Единый sync API (этап 2)
+
+`POST /api/tasks/sync` принимает индивидуальный bearer `sc_` + 64 hex символа. Интеграция определяется записью токена; передавать `spreadsheet_id` можно только как контекстную проверку, а выбирать задачу, интеграцию или действие клиент не может. Тело ограничено 64 KiB и неизвестные поля отвергаются.
+
+Обязательные поля: `record_uuid`, `spreadsheet_id`, `sheet_id`, `row_number`, `environment`, `section`, `description`. Остальные поля совпадают с legacy DTO. Сервер по `(integration_id, record_uuid)` выбирает `created`, `updated` или `skipped`. Успешный ответ содержит `record_uuid`, `action`, `task_id`, `task_url`, `synced_at`, `attempted_at`, SHA-256 `sync_hash` и UUID `operation_id`. Для skip `synced_at` остаётся временем последней подтверждённой записи; `attempted_at` отмечает текущую проверку.
+
+`201` означает создание, `200` — update или skip. `401/403` — неверный, отозванный или недостаточно scoped токен; `409` — конфликт состояния/неизвестный результат; `413` — превышен лимит; `422` — невалидный payload; `502/504` — неподтверждённая внешняя ошибка, повторять её как новый create нельзя. В `retryable` указывается, была ли безопасно сохранена ошибка до внешней отправки.
+
+Legacy POST/PUT и справочники принимают индивидуальный токен. Общий `GOOGLE_SHEETS_INTEGRATION_TOKEN` допускается только для старых маршрутов интеграций, где включён `allow_legacy_token` и master switch `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN=true`. После перехода scripts master switch можно выключить; индивидуальные токены продолжают работать. Справочники с общим токеном требуют `spreadsheet_id`; индивидуальные токены ограничивают запрос своей интеграцией.
+
+Выдача/листинг/отзыв токенов, `legacy-status` и переключение per-integration legacy-флага доступны только CLI-команде `php artisan integrations:tokens ...` и пользователю с разрешениями recovery, users и roles. После переноса scripts установите `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN=false`. Полный синтаксис и переход описаны в [DEPLOY](DEPLOY.md#переход-скриптов-и-токенов-этап-2) и [разделе ролей](PROJECT_MANUAL.md#роли-и-доступ-к-интеграциям).
 
 ---
 
@@ -252,7 +266,7 @@ curl -X PUT http://localhost/api/integrations/activecollab/tasks/123 \
 
 ### GET /api/integrations/activecollab/task-lists
 
-Возвращает список task lists из дефолтной конфигурации ActiveCollab (из `.env`).
+Возвращает task lists проекта, выбранного для интеграции, аутентифицированной текущим integration token.
 
 Используется для вспомогательных целей: выяснить ID task list при настройке маппингов.
 
@@ -376,7 +390,7 @@ external_id = "{spreadsheet_id}:{sheet_id}:{row_number}"
 
 До перевода обслуживаются старые запросы без UUID. UUID до перевода и отсутствие UUID после перевода возвращают `409 legacy_binding_conflict` с инструкцией перехода. Если UUID уже привязан, но readiness ещё false, все legacy-запросы этой интеграции блокируются, включая пустые позиции. Неоднозначный locator не выбирается произвольно. Неверный UUID даёт 422 до HTTP. Успешные envelopes остаются прежними.
 
-Reserve берёт краткий integration lock, затем export lock. Это защищает UUID/legacy first insert после снятия global unique. HTTP выполняется после commit; operation ID/lease защищают завершение. Индивидуальные токены — следующий этап; общий токен пока не обеспечивает изоляцию независимых пользователей. Переход/rollback: [DEPLOY](DEPLOY.md#переход-на-uuid-шаг-14).
+Reserve берёт integration lock, затем token lock (для scoped доступа) и export lock. HTTP выполняется после commit; operation ID/lease защищают завершение. Старые writers используют общий token только если `allow_legacy_token=true` на интеграции. Переход UUID и установка scoped клиента описаны в [DEPLOY](DEPLOY.md#переход-скриптов-и-токенов-этап-2).
 
 ---
 
@@ -437,7 +451,7 @@ Reserve берёт краткий integration lock, затем export lock. Эт
 md5("{severity}|{priority}|{device}|{resolution}|{environment}|{section}|{description}|{screenshot}|{comment}|{task_type}|{responsible}|{reporter}|{status}")
 ```
 
-Null-значения участвуют как пустая строка. Hash возвращается для диагностики подтверждённого содержимого; текущий Apps Script не пропускает запросы по hash. Итоговый SHA-256/skip относится к следующему этапу.
+Null-значения участвуют как пустая строка в legacy `legacy-md5-v1`. Новый sync хранит `payload-sha256-v2`, рассчитанный по конечному payload, destination (включая connection ID) и mapping. Только подтверждённый SHA-256 допускает skip; старый или неизвестный hash требует одного полного PUT.
 
 ---
 
@@ -445,15 +459,16 @@ Null-значения участвуют как пустая строка. Hash 
 
 | Код | Причина |
 |-----|---------|
-| 401 | Токен не передан или не совпадает с `GOOGLE_SHEETS_INTEGRATION_TOKEN` |
+| 401 | Индивидуальный bearer неверен/отозван или глобальный token не настроен для legacy маршрута |
 | 404 | Нет активной интеграции для данного `spreadsheet_id` |
 | 409 | Полная привязка уже существует (POST) либо привязка отсутствует, неполна или не соответствует контексту (POST/PUT) |
 | 422 | Ошибка валидации входящего payload |
-| 500 | Не настроен integration token в `.env` |
+| 403 | Общий legacy token не разрешён для интеграции или контекст другой таблицы |
 | 500 | Ошибка маппинга (не найден `task_type` в `task_list_mapping` или `responsible` в `assignee_mapping`) |
 | 409 | `sync_in_progress` или `sync_outcome_unknown`: новая отправка заблокирована |
 | 502 | Внешний результат не подтверждён (`sync_outcome_unknown`) |
 | 504 | Timeout, возможен внешний результат (`sync_outcome_unknown`) |
+| 413 | JSON sync больше 64 KiB |
 
 
 ## Резервирование и неопределённый результат

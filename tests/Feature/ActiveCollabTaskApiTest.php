@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabTaskApiTest extends TestCase
@@ -29,6 +30,7 @@ class ActiveCollabTaskApiTest extends TestCase
         config()->set('services.active_collab.project_id', 10);
         config()->set('services.active_collab.base_url', 'https://app.activecollab.com/460565/api/v1');
         Http::preventStrayRequests();
+        Http::fake(['https://ac.example.com/api/v1/labels/task-labels' => Http::response([['id' => 7, 'name' => 'Critical', 'is_global' => true]])]);
     }
 
     public function test_it_rejects_requests_without_valid_bearer_token(): void
@@ -37,7 +39,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
         $response->assertStatus(401)
             ->assertJson([
-                'message' => 'Unauthorized.',
+                'error' => ['code' => 'unauthorized'],
             ]);
     }
 
@@ -87,10 +89,10 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->assertSame('backend', $export->source_payload['task_type']);
         $this->assertSame(101, $export->active_collab_payload['task_list_id']);
         $this->assertSame(3, $export->active_collab_payload['assignee_id']);
-        $this->assertSame(7, $export->active_collab_payload['label_id']);
+        $this->assertSame(['Critical'], $export->active_collab_payload['labels']);
         $this->assertNotEmpty($export->sync_hash);
 
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
     }
 
     public function test_it_returns_conflict_for_already_created_row(): void
@@ -172,7 +174,7 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->assertSame('Updated comment', $export->source_payload['comment'] ?? null);
         $this->assertSame('Updated comment', $this->payload(['comment' => 'Updated comment'])['comment']);
 
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
     }
 
     public function test_it_returns_error_when_integration_token_is_not_configured(): void
@@ -181,9 +183,9 @@ class ActiveCollabTaskApiTest extends TestCase
 
         $response = $this->postJson('/api/integrations/activecollab/tasks', $this->payload());
 
-        $response->assertStatus(500)
+        $response->assertStatus(401)
             ->assertJson([
-                'message' => 'Integration token not configured.',
+                'error' => ['code' => 'unauthorized'],
             ]);
     }
 
@@ -204,7 +206,7 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->assertDatabaseHas('active_collab_task_exports', [
             'external_id' => 'sheet-123:sheet-tab-1:8',
             'status' => 'failed',
-            'error_message' => 'Для типа задачи "frontend" не настроен ActiveCollab Task List.',
+            'error_message' => 'Request preparation failed before dispatch.',
         ]);
 
         Http::assertNothingSent();
@@ -240,7 +242,7 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->assertDatabaseHas('active_collab_task_exports', [
             'task_id' => 123,
             'status' => 'failed',
-            'error_message' => 'Для типа задачи "frontend" не настроен ActiveCollab Task List.',
+            'error_message' => 'Request preparation failed before dispatch.',
         ]);
 
         Http::assertNothingSent();
@@ -248,23 +250,12 @@ class ActiveCollabTaskApiTest extends TestCase
 
     public function test_it_returns_task_lists_from_activecollab(): void
     {
-        Http::fake([
-            'https://app.activecollab.com/460565/api/v1/projects/10/task-lists' => Http::response([
-                'data' => [
-                    ['id' => 31, 'name' => 'Default'],
-                ],
-            ], 200),
-        ]);
-
-        $response = $this->withToken('sheet-token')
-            ->getJson('/api/integrations/activecollab/task-lists');
-
-        $response->assertOk()
-            ->assertJsonPath('data.0.id', 31)
-            ->assertJsonPath('data.0.name', 'Default');
-
-        Http::assertSent(fn ($request): bool => $request->hasHeader('X-Angie-AuthApiToken', ['global-ac-token'])
-            && $request->url() === 'https://app.activecollab.com/460565/api/v1/projects/10/task-lists');
+        $this->createIntegration();
+        Http::fake(['https://ac.example.com/api/v1/projects/10/task-lists' => Http::response([['id' => 31, 'name' => 'Default']])]);
+        $this->withToken('sheet-token')->getJson('/api/integrations/activecollab/task-lists?spreadsheet_id=sheet-123')
+            ->assertOk()->assertJsonPath('0.id', 31)->assertJsonPath('0.name', 'Default');
+        Http::assertSent(fn ($request) => $request->hasHeader('X-Angie-AuthApiToken', ['integration-ac-token'])
+            && $request->url() === 'https://ac.example.com/api/v1/projects/10/task-lists');
     }
 
     // ── validation ────────────────────────────────────────────────────────────────
@@ -282,6 +273,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
     public function test_it_returns_422_when_screenshot_is_not_a_valid_url(): void
     {
+        $this->createIntegration();
         $response = $this->withToken('sheet-token')
             ->postJson('/api/integrations/activecollab/tasks', $this->payload([
                 'screenshot' => 'not-a-valid-url',
@@ -293,6 +285,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
     public function test_it_returns_422_when_row_number_is_zero(): void
     {
+        $this->createIntegration();
         $response = $this->withToken('sheet-token')
             ->postJson('/api/integrations/activecollab/tasks', $this->payload([
                 'row_number' => 0,
@@ -306,7 +299,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
     public function test_it_returns_404_when_integration_is_inactive(): void
     {
-        ActiveCollabIntegration::create([
+        ActiveCollabIntegrationFixture::create([
             'name' => 'Inactive Integration',
             'spreadsheet_id' => 'sheet-123',
             'active_collab_base_url' => 'https://ac.example.com/api/v1',
@@ -350,7 +343,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
         $export = ActiveCollabTaskExport::firstOrFail();
         $this->assertSame(31, $export->active_collab_payload['task_list_id']);
-        $this->assertArrayNotHasKey('assignee_id', $export->active_collab_payload);
+        $this->assertSame(0, $export->active_collab_payload['assignee_id']);
         $this->assertArrayNotHasKey('label_id', $export->active_collab_payload);
     }
 
@@ -447,45 +440,18 @@ class ActiveCollabTaskApiTest extends TestCase
 
     public function test_get_users_returns_activecollab_users(): void
     {
-        Http::fake([
-            'https://app.activecollab.com/460565/api/v1/users' => Http::response([
-                'data' => [
-                    ['id' => 3, 'display_name' => 'Tony Yats'],
-                ],
-            ], 200),
-        ]);
-
-        config()->set('services.active_collab.base_url', 'https://app.activecollab.com/460565/api/v1');
-
-        $response = $this->withToken('sheet-token')
-            ->getJson('/api/integrations/activecollab/users');
-
-        $response->assertOk()
-            ->assertJsonPath('data.0.id', 3)
-            ->assertJsonPath('data.0.display_name', 'Tony Yats');
-
-        Http::assertSent(fn ($request): bool => str_ends_with((string) $request->url(), '/users')
-            && $request->hasHeader('X-Angie-AuthApiToken', ['global-ac-token']));
+        $this->createIntegration();
+        Http::fake(['https://ac.example.com/api/v1/projects/10' => Http::response(['single' => ['id' => 10, 'is_trashed' => false, 'members' => [3]], 'label_ids' => []]),
+            'https://ac.example.com/api/v1/users' => Http::response([['id' => 3, 'display_name' => 'Tony Yats'], ['id' => 4, 'display_name' => 'Other project']])]);
+        $this->withToken('sheet-token')->getJson('/api/integrations/activecollab/users?spreadsheet_id=sheet-123')
+            ->assertOk()->assertJsonCount(1)->assertJsonPath('0.id', 3);
     }
 
     public function test_get_labels_returns_activecollab_labels(): void
     {
-        Http::fake([
-            'https://app.activecollab.com/460565/api/v1/labels' => Http::response([
-                'data' => [
-                    ['id' => 7, 'name' => 'Critical'],
-                ],
-            ], 200),
-        ]);
-
-        config()->set('services.active_collab.base_url', 'https://app.activecollab.com/460565/api/v1');
-
-        $response = $this->withToken('sheet-token')
-            ->getJson('/api/integrations/activecollab/labels');
-
-        $response->assertOk()
-            ->assertJsonPath('data.0.id', 7)
-            ->assertJsonPath('data.0.name', 'Critical');
+        $this->createIntegration();
+        $this->withToken('sheet-token')->getJson('/api/integrations/activecollab/labels?spreadsheet_id=sheet-123')
+            ->assertOk()->assertJsonPath('0.id', 7)->assertJsonPath('0.name', 'Critical');
     }
 
     /** @param array<string, mixed>|null $overrides */
@@ -602,7 +568,7 @@ class ActiveCollabTaskApiTest extends TestCase
                 'data' => ['task_id' => 123, 'task_url' => $confirmed['task_url']],
             ]);
 
-        Http::assertSentCount($mappingFailure ? 0 : 1);
+        $this->assertTaskWrites($mappingFailure ? 0 : 1);
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST');
     }
 
@@ -633,7 +599,7 @@ class ActiveCollabTaskApiTest extends TestCase
 
         $this->assertSame('updated', $target->fresh()->status);
         $this->assertSame($before, $other->fresh()->getAttributes());
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://ac.example.com/api/v1/projects/10/tasks/123');
     }
@@ -675,13 +641,13 @@ class ActiveCollabTaskApiTest extends TestCase
     public function test_mapping_failure_before_dispatch_can_be_retried_safely(): void
     {
         $integration = $this->createIntegration();
-        Http::fake(['*' => Http::response(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])]);
+        $this->fakeAllWithLabels(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']]);
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload(['task_type' => 'unmapped']))
             ->assertStatus(500)->assertJsonPath('error.code', 'mapping_invalid');
         Http::assertNothingSent();
         $integration->update(['task_list_mapping' => ['backend' => 101, 'unmapped' => 102]]);
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload(['task_type' => 'unmapped']))->assertCreated();
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
         $this->assertDatabaseCount('active_collab_sync_attempts', 2);
         $this->assertDatabaseHas('active_collab_sync_attempts', ['status' => 'failed', 'error_code' => 'mapping_invalid']);
         $this->assertDatabaseHas('active_collab_sync_attempts', ['status' => 'succeeded']);
@@ -690,7 +656,9 @@ class ActiveCollabTaskApiTest extends TestCase
     public function test_timeout_is_unknown_and_never_repeats_create(): void
     {
         $this->createIntegration();
-        Http::fake(fn () => throw new ConnectionException('cURL error 28: integration-ac-token'));
+        Http::fake(fn ($request) => str_contains($request->url(), '/labels/task-labels')
+            ? Http::response([['id' => 7, 'name' => 'Critical', 'is_global' => true]])
+            : throw new ConnectionException('cURL error 28: integration-ac-token'));
         $first = $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload());
         $first->assertStatus(504)->assertJsonPath('error.retryable', false);
         $this->assertStringNotContainsString('integration-ac-token', $first->getContent());
@@ -703,18 +671,18 @@ class ActiveCollabTaskApiTest extends TestCase
     public function test_malformed_success_does_not_permit_a_second_create(): void
     {
         $this->createIntegration();
-        Http::fake(['*' => Http::response(['single' => ['id' => 123]])]);
+        $this->fakeAllWithLabels(['single' => ['id' => 123]]);
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())
             ->assertStatus(502)->assertJsonPath('error.code', 'sync_outcome_unknown');
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())->assertStatus(409);
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
         $this->assertDatabaseHas('active_collab_task_exports', ['last_attempt_status' => 'unknown', 'task_id' => null]);
     }
 
     public function test_commit_failure_after_external_create_blocks_a_second_call(): void
     {
         $this->createIntegration();
-        Http::fake(['*' => Http::response(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])]);
+        $this->fakeAllWithLabels(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']]);
         ActiveCollabTaskExport::updating(function (ActiveCollabTaskExport $export): void {
             if ($export->last_attempt_status === 'succeeded') {
                 throw new \RuntimeException('Simulated failed commit.');
@@ -727,15 +695,19 @@ class ActiveCollabTaskApiTest extends TestCase
         }
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())
             ->assertStatus(409)->assertJsonPath('error.code', 'sync_outcome_unknown');
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
         $this->assertDatabaseHas('active_collab_task_exports', ['last_attempt_status' => 'unknown', 'task_id' => null]);
     }
 
     public function test_database_outage_leaves_durable_running_then_expiry_blocks_create(): void
     {
         $this->createIntegration();
-        Http::fake(['*' => Http::response(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])]);
-        ActiveCollabSyncAttempt::updating(fn () => throw new \RuntimeException('Simulated database outage.'));
+        $this->fakeAllWithLabels(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']]);
+        ActiveCollabSyncAttempt::updating(function (ActiveCollabSyncAttempt $attempt): void {
+            if (in_array($attempt->status, ['succeeded', 'unknown'], true)) {
+                throw new \RuntimeException('Simulated database outage.');
+            }
+        });
         try {
             $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())->assertStatus(502);
         } finally {
@@ -745,7 +717,7 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->travel(121)->seconds();
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())
             ->assertStatus(409)->assertJsonPath('error.code', 'sync_outcome_unknown');
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
         $this->assertDatabaseHas('active_collab_sync_attempts', ['status' => 'unknown']);
     }
 
@@ -756,7 +728,7 @@ class ActiveCollabTaskApiTest extends TestCase
         Log::listen(function ($event) use (&$logs): void {
             $logs[] = [$event->message, $event->context];
         });
-        Http::fake(['*' => Http::response(['message' => 'integration-ac-token global-ac-token sheet-token'], 500)]);
+        $this->fakeAllWithLabels(['message' => 'integration-ac-token global-ac-token sheet-token'], 500);
         $response = $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload([
             'comment' => 'integration-ac-token global-ac-token sheet-token',
         ]))->assertStatus(502);
@@ -783,7 +755,7 @@ class ActiveCollabTaskApiTest extends TestCase
             ->assertStatus(409)->assertJsonPath('error.code', 'remote_task_missing');
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload())
             ->assertStatus(409)->assertJsonPath('data.task_id', 123);
-        Http::assertSentCount(1);
+        $this->assertTaskWrites(1);
     }
 
     public function test_missing_task_can_receive_a_fresh_validated_source_without_external_write(): void
@@ -821,10 +793,18 @@ class ActiveCollabTaskApiTest extends TestCase
         $integration = $this->createIntegration();
         $integration->forceFill(['uuid_only' => true])->save();
         $uuid = (string) Str::uuid();
-        Http::fakeSequence()
-            ->push(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])
-            ->push(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])
-            ->push(['single' => ['id' => 456, 'url_path' => '/projects/10/tasks/456']]);
+        $tasks = [
+            ['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']],
+            ['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']],
+            ['single' => ['id' => 456, 'url_path' => '/projects/10/tasks/456']],
+        ];
+        Http::fake(function ($request) use (&$tasks) {
+            if (str_contains($request->url(), '/labels/task-labels')) {
+                return Http::response([['id' => 7, 'name' => 'Critical', 'is_global' => true]]);
+            }
+
+            return Http::response(array_shift($tasks));
+        });
         $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload(['record_uuid' => strtoupper($uuid)]))->assertCreated();
         $export = ActiveCollabTaskExport::firstOrFail();
         $this->withToken('sheet-token')->putJson('/api/integrations/activecollab/tasks/123', $this->payload([
@@ -838,7 +818,7 @@ class ActiveCollabTaskApiTest extends TestCase
         $this->assertDatabaseCount('active_collab_task_exports', 2);
         $this->assertSame(2, ActiveCollabTaskExport::where('external_id', 'sheet-123:moved-tab:19')->count());
         $this->assertSame(8, $export->attempts()->oldest('started_at')->firstOrFail()->source_payload['row_number']);
-        Http::assertSentCount(3);
+        $this->assertTaskWrites(3);
     }
 
     public function test_uuid_is_required_only_after_explicit_integration_transition(): void
@@ -927,19 +907,42 @@ class ActiveCollabTaskApiTest extends TestCase
         $second->spreadsheet_id = 'other-sheet';
         $second->save();
         $uuid = (string) Str::uuid();
-        Http::fakeSequence()->push(['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']])
-            ->push(['single' => ['id' => 456, 'url_path' => '/projects/10/tasks/456']]);
+        $tasks = [
+            ['single' => ['id' => 123, 'url_path' => '/projects/10/tasks/123']],
+            ['single' => ['id' => 456, 'url_path' => '/projects/10/tasks/456']],
+        ];
+        Http::fake(function ($request) use (&$tasks) {
+            if (str_contains($request->url(), '/labels/task-labels')) {
+                return Http::response([['id' => 7, 'name' => 'Critical', 'is_global' => true]]);
+            }
+
+            return Http::response(array_shift($tasks));
+        });
         foreach (['sheet-123', 'other-sheet'] as $sheet) {
             $this->withToken('sheet-token')->postJson('/api/integrations/activecollab/tasks', $this->payload(['spreadsheet_id' => $sheet, 'record_uuid' => $uuid]))->assertCreated();
         }
         $this->withToken('sheet-token')->putJson('/api/integrations/activecollab/tasks/123', $this->payload(['spreadsheet_id' => 'other-sheet', 'record_uuid' => $uuid]))->assertConflict();
         $this->assertSame(2, ActiveCollabTaskExport::where('record_uuid', $uuid)->count());
-        Http::assertSentCount(2);
+        $this->assertTaskWrites(2);
+    }
+
+    private function assertTaskWrites(int $expected): void
+    {
+        $this->assertCount($expected, Http::recorded(fn ($request) => in_array($request->method(), ['POST', 'PUT'], true)));
+    }
+
+    /** @param array<string, mixed> $response */
+    private function fakeAllWithLabels(array $response, int $status = 200): void
+    {
+        Http::fake([
+            'https://ac.example.com/api/v1/labels/task-labels' => Http::response([['id' => 7, 'name' => 'Critical', 'is_global' => true]]),
+            '*' => Http::response($response, $status),
+        ]);
     }
 
     private function createIntegration(): ActiveCollabIntegration
     {
-        return ActiveCollabIntegration::create([
+        $integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Test Integration',
             'spreadsheet_id' => 'sheet-123',
             'active_collab_base_url' => 'https://ac.example.com/api/v1',
@@ -957,6 +960,9 @@ class ActiveCollabTaskApiTest extends TestCase
             ],
             'active' => true,
         ]);
+        $integration->forceFill(['allow_legacy_token' => true])->save();
+
+        return $integration;
     }
 
     /**

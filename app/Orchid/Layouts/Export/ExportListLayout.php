@@ -50,6 +50,9 @@ class ExportListLayout extends Table
                 ->align(TD::ALIGN_CENTER)
                 ->render(fn (ActiveCollabTaskExport $e) => $e->row_number ?? '—'),
 
+            TD::make('attempts', 'Попытки')->render(fn (ActiveCollabTaskExport $e) => Link::make('История')
+                ->route('platform.exports.attempts', ['export' => $e->id])),
+
             TD::make('error_message', 'Ошибка')
                 ->defaultHidden()
                 ->render(fn (ActiveCollabTaskExport $e): string => $e->error_message

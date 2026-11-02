@@ -161,6 +161,21 @@ class ActiveCollabTaskBodyBuilderTest extends TestCase
         $this->assertStringContainsString('<strong>Ответственный:</strong> —', $body);
     }
 
+    public function test_build_body_escapes_parameter_values_and_google_source_link(): void
+    {
+        $body = $this->builder->buildBody($this->makeData([
+            'spreadsheetId' => 'sheet&<id>', 'sheetId' => 'tab"<x>', 'environment' => '<img src=x>',
+            'section' => 'A & B', 'priority' => '"high"',
+        ]));
+
+        $this->assertStringContainsString('&lt;img src=x&gt;', $body);
+        $this->assertStringContainsString('A &amp; B', $body);
+        $this->assertStringContainsString('&quot;high&quot;', $body);
+        $this->assertStringContainsString('sheet%26%3Cid%3E', $body);
+        $this->assertStringContainsString('tab%22%3Cx%3E', $body);
+        $this->assertStringNotContainsString('<img src=x>', $body);
+    }
+
     public function test_build_body_includes_row_number_in_source_footer(): void
     {
         $body = $this->builder->buildBody($this->makeData(['rowNumber' => 42]));

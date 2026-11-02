@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Repositories\ActiveCollab;
 
+use App\Data\ActiveCollab\ActiveCollabAccessContext;
 use App\Data\ActiveCollab\ActiveCollabRecoveryData;
 use App\Data\ActiveCollab\ActiveCollabSyncReservation;
 use App\Data\ActiveCollab\ActiveCollabTaskData;
 use App\Exceptions\TaskAlreadyExistsException;
 use App\Exceptions\TaskBindingConflictException;
 use App\Exceptions\TaskSyncConflictException;
+use App\Models\ActiveCollabConnection;
 use App\Models\ActiveCollabIntegration;
 use App\Models\ActiveCollabSyncAttempt;
 use App\Models\ActiveCollabTaskExport;
@@ -24,7 +26,8 @@ use Illuminate\Support\Str;
 
 class ActiveCollabExportRepository
 {
-    public function __construct(private readonly AdminAuditLogRepository $audit = new AdminAuditLogRepository()) {}
+    public function __construct(private readonly AdminAuditLogRepository $audit = new AdminAuditLogRepository(),
+        private readonly ActiveCollabIntegrationTokenRepository $tokens = new ActiveCollabIntegrationTokenRepository()) {}
 
     /** Legacy-only lookup: an ambiguous locator must never choose an arbitrary export. */
     public function findByExternalId(string $externalId, ActiveCollabIntegration $integration): ?ActiveCollabTaskExport
@@ -66,19 +69,32 @@ class ActiveCollabExportRepository
     }
 
     /** @param array<string, mixed> $sourcePayload */
-    public function reserve(ActiveCollabTaskData $data, ActiveCollabIntegration $integration, array $sourcePayload, ?int $taskId = null): ActiveCollabSyncReservation
+    public function reserve(ActiveCollabTaskData $data, ActiveCollabIntegration $integration, array $sourcePayload, ?int $taskId = null, ?ActiveCollabAccessContext $access = null, bool $auto = false): ActiveCollabSyncReservation
     {
         // A first-insert collision rolls back before re-reading the winner in a new transaction.
         $retried = false;
         while (true) {
             try {
-                return DB::transaction(function () use ($data, $integration, $sourcePayload, $taskId): ActiveCollabSyncReservation {
+                return DB::transaction(function () use ($data, $integration, $sourcePayload, $taskId, $access, $auto): ActiveCollabSyncReservation {
                     $fresh = ActiveCollabIntegration::whereKey($integration->id)->lockForUpdate()->first();
+                    $connection = $fresh?->connection_id !== null
+                        ? ActiveCollabConnection::query()->whereKey($fresh->connection_id)->lockForUpdate()->first()
+                        : null;
+                    if ($connection !== null && $fresh !== null) {
+                        $fresh->setRelation('activeCollabConnection', $connection);
+                    }
                     if ($fresh === null || ! $fresh->active || $fresh->spreadsheet_id !== $data->spreadsheetId
                         || $fresh->active_collab_project_id !== $integration->active_collab_project_id
+                        || $fresh->connection_id !== $integration->connection_id || $connection?->active !== true
                         || $fresh->resolvedBaseUrl() !== $integration->resolvedBaseUrl()
                         || ! hash_equals($fresh->resolvedApiToken(), $integration->resolvedApiToken())) {
                         throw new TaskBindingConflictException();
+                    }
+                    if ($access !== null) {
+                        $this->tokens->assertAccess($access, $fresh, true);
+                    }
+                    if ($auto && ! $fresh->uuid_only) {
+                        throw new TaskSyncConflictException('legacy_binding_conflict', null);
                     }
                     $this->assertIdentityMode($fresh, $data->recordUuid);
                     $export = $data->recordUuid !== null
@@ -102,7 +118,10 @@ class ActiveCollabExportRepository
                         throw new TaskBindingConflictException();
                     }
                     $bound = $this->hasCompleteBinding($export);
-                    if ($taskId === null && $bound) {
+                    if ($auto && $bound) {
+                        $taskId = $export->task_id;
+                    }
+                    if (! $auto && $taskId === null && $bound) {
                         throw new TaskAlreadyExistsException($export->task_id, $export->task_url);
                     }
                     if ($taskId !== null) {
@@ -155,10 +174,17 @@ class ActiveCollabExportRepository
         }
     }
 
-    /** @param array<string, mixed> $payload */
-    public function prepareDispatch(ActiveCollabSyncReservation $reservation, array $payload, string $hash): bool
+    /** @param array<string, mixed> $payload
+     * @return bool|array<string, mixed>
+     */
+    public function prepareDispatch(ActiveCollabSyncReservation $reservation, array $payload, string $hash,
+        ?string $hashVersion = null, ?\Closure $guard = null, bool $allowSkip = false): bool|array
     {
-        return DB::transaction(function () use ($reservation, $payload, $hash): bool {
+        return DB::transaction(function () use ($reservation, $payload, $hash, $hashVersion, $guard, $allowSkip): bool|array {
+            if ($guard !== null) {
+                $this->lockIntegrationForExport($reservation->exportId);
+                $guard();
+            }
             $export = $this->ownedRunning($reservation);
             if ($export === null) {
                 return false;
@@ -168,18 +194,28 @@ class ActiveCollabExportRepository
 
                 return false;
             }
-            $changed = ActiveCollabSyncAttempt::where('operation_id', $reservation->operationId)
-                ->where('export_id', $reservation->exportId)->where('status', 'running')
-                ->update(['active_collab_payload' => $payload, 'sync_hash' => $hash]);
-            if ($changed !== 1) {
-                throw new \LogicException('Running attempt is missing.');
+            $attempt = ActiveCollabSyncAttempt::where('operation_id', $reservation->operationId)
+                ->where('export_id', $reservation->exportId)->where('status', 'running')->firstOrFail();
+            $attempt->update(['active_collab_payload' => $payload, 'sync_hash' => $hash, 'hash_version' => $hashVersion]);
+            if ($allowSkip && $attempt->action === 'update' && $export->binding_status === 'bound'
+                && $export->hash_version === $hashVersion && $hashVersion === 'payload-sha256-v2' && $export->sync_hash === $hash
+                && $export->synced_at !== null && $export->active_collab_payload !== null && $export->active_collab_response !== null) {
+                $attempt->update(['action' => 'skip']);
+                $this->finishLocked($export, 'succeeded', [], null, null);
+
+                return ['record_uuid' => $export->record_uuid, 'action' => 'skipped', 'task_id' => $export->task_id,
+                    'task_url' => $export->task_url, 'synced_at' => $export->synced_at->toIso8601String(),
+                    'attempted_at' => $attempt->started_at->toIso8601String(),
+                    'sync_hash' => $export->sync_hash, 'operation_id' => $reservation->operationId];
             }
 
             return true;
-        });
+        }, 3);
     }
 
-    /** @param array<string, mixed> $confirmed */
+    /** @param array<string, mixed> $confirmed
+     * @param  array<string, mixed>  $attemptResponse
+     */
     public function complete(
         ActiveCollabSyncReservation $reservation,
         string $status,
@@ -188,14 +224,16 @@ class ActiveCollabExportRepository
         ?string $errorMessage = null,
         ?int $httpStatus = null,
         ?\Closure $guard = null,
+        array $attemptResponse = [],
     ): bool {
         if (! in_array($status, ['succeeded', 'failed', 'unknown'], true)) {
             throw new \InvalidArgumentException('Invalid completion status.');
         }
 
-        return DB::transaction(function () use ($reservation, $status, $confirmed, $errorCode, $errorMessage, $httpStatus, $guard): bool {
+        return DB::transaction(function () use ($reservation, $status, $confirmed, $errorCode, $errorMessage, $httpStatus, $guard, $attemptResponse): bool {
             if ($guard !== null) {
                 $this->lockIntegrationForExport($reservation->exportId);
+                $guard();
             }
             $export = $this->ownedRunning($reservation);
             if ($export === null) {
@@ -206,10 +244,7 @@ class ActiveCollabExportRepository
 
                 return false;
             }
-            if ($guard !== null) {
-                $guard();
-            }
-            $this->finishLocked($export, $status, $confirmed, $errorCode, $errorMessage, $httpStatus);
+            $this->finishLocked($export, $status, $confirmed, $errorCode, $errorMessage, $httpStatus, $attemptResponse);
 
             return true;
         });
@@ -384,13 +419,14 @@ class ActiveCollabExportRepository
         return ['operation_id' => $result->operation_id, 'status' => $result->context['outcome']];
     }
 
-    /** @param array{integration_id: string, project_id: int, base_url: string, api_token: string} $destination */
+    /** @param array{integration_id: string, connection_id: string, project_id: int, base_url: string, api_token: string} $destination */
     public function assertRecoveryContext(int $actorId, string $exportId, array $destination): void
     {
         $this->authorizeRecovery($actorId);
         $export = ActiveCollabTaskExport::findOrFail($exportId);
         $integration = ActiveCollabIntegration::whereKey($export->integration_id)->lockForUpdate()->first();
         if ($integration === null || ! $integration->active || $integration->id !== $destination['integration_id']
+            || $integration->connection_id !== $destination['connection_id'] || $integration->activeCollabConnection?->active !== true
             || $integration->active_collab_project_id !== $destination['project_id']
             || $export->project_id !== $destination['project_id']
             || $integration->resolvedBaseUrl() !== $destination['base_url']
@@ -400,7 +436,7 @@ class ActiveCollabExportRepository
     }
 
     /** @param array<string, mixed>|null $task
-     * @param  array{integration_id: string, project_id: int, base_url: string, api_token: string}  $destination
+     * @param  array{integration_id: string, connection_id: string, project_id: int, base_url: string, api_token: string}  $destination
      */
     public function finalizeRecovery(ActiveCollabSyncReservation $reservation, int $actorId, ActiveCollabIntegration $snapshot, ?array $task, array $destination): bool
     {
@@ -416,7 +452,7 @@ class ActiveCollabExportRepository
                 return false;
             }
             $this->assertRecoveryContext($actorId, $export->id, $destination);
-            $changes = ['sync_hash' => null];
+            $changes = ['sync_hash' => null, 'hash_version' => null];
             if ($task === null && $export->task_id === null) {
                 $changes += ['binding_status' => 'unbound', 'task_url' => null];
             }
@@ -528,7 +564,7 @@ class ActiveCollabExportRepository
             'status' => 'running', 'started_at' => now(), 'source_payload' => $sourcePayload,
         ]);
 
-        return new ActiveCollabSyncReservation($export->id, $operationId);
+        return new ActiveCollabSyncReservation($export->id, $operationId, action: $action, taskId: $action === 'update' ? $export->task_id : null);
     }
 
     private function lockIntegrationForExport(string $exportId): void
@@ -579,8 +615,10 @@ class ActiveCollabExportRepository
         return $lease;
     }
 
-    /** @param array<string, mixed> $confirmed */
-    private function finishLocked(ActiveCollabTaskExport $export, string $status, array $confirmed, ?string $errorCode, ?string $errorMessage, ?int $httpStatus = null): void
+    /** @param array<string, mixed> $confirmed
+     * @param  array<string, mixed>  $attemptResponse
+     */
+    private function finishLocked(ActiveCollabTaskExport $export, string $status, array $confirmed, ?string $errorCode, ?string $errorMessage, ?int $httpStatus = null, array $attemptResponse = []): void
     {
         $attempt = ActiveCollabSyncAttempt::where('export_id', $export->id)
             ->where('operation_id', $export->operation_id)->where('status', 'running')->first();
@@ -588,11 +626,11 @@ class ActiveCollabExportRepository
             throw new \LogicException('Running attempt is missing.');
         }
         $changes = ['last_attempt_status' => $status, 'lease_expires_at' => null, 'error_message' => $errorMessage];
-        if ($status === 'succeeded' && $attempt->action !== 'reconcile') {
+        if ($status === 'succeeded' && ! in_array($attempt->action, ['reconcile', 'skip'], true)) {
             $changes += $confirmed;
             $changes['status'] = $attempt->action === 'create' ? 'created' : 'updated';
             $changes['binding_status'] = 'bound';
-            $changes['synced_at'] = now();
+            $changes['synced_at'] = $confirmed['synced_at'] ?? now();
             $attempt->active_collab_response = $confirmed['active_collab_response'];
         } elseif ($status !== 'succeeded') {
             $changes['status'] = 'failed';
@@ -601,6 +639,9 @@ class ActiveCollabExportRepository
             $changes['binding_status'] = 'remote_missing';
         }
         $export->update($changes);
+        if ($attemptResponse !== []) {
+            $attempt->active_collab_response = $attemptResponse;
+        }
         $attempt->fill([
             'status' => $status, 'finished_at' => now(), 'http_status' => $httpStatus,
             'error_code' => $errorCode, 'error_message' => $errorMessage,

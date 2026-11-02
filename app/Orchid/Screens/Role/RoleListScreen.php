@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Orchid\Screens\Role;
 
+use App\Models\ActiveCollabIntegration;
 use App\Orchid\Layouts\Role\RoleListLayout;
+use Illuminate\Support\Facades\Gate;
 use Orchid\Platform\Models\Role;
 use Orchid\Screen\Action;
 use Orchid\Screen\Actions\Link;
@@ -20,6 +22,8 @@ class RoleListScreen extends Screen
      */
     public function query(): iterable
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+
         return [
             'roles' => Role::filters()->defaultSort('id', 'desc')->paginate(),
         ];
@@ -41,15 +45,6 @@ class RoleListScreen extends Screen
     public function description(): ?string
     {
         return 'A comprehensive list of all roles, including their permissions and associated users.';
-    }
-
-    /** @return iterable<int, string> */
-    #[\Override]
-    public function permission(): ?iterable
-    {
-        return [
-            'platform.systems.roles',
-        ];
     }
 
     /**

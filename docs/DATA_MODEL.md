@@ -5,8 +5,10 @@
 | Таблица | Модель | Назначение |
 |---------|--------|-----------|
 | `active_collab_integrations` | `ActiveCollabIntegration` | Настройки интеграции для Google Sheets таблицы |
+| `active_collab_connections` | `ActiveCollabConnection` | Переиспользуемые подключения к ActiveCollab |
 | `active_collab_task_exports` | `ActiveCollabTaskExport` | Журнал синхронизаций строк |
-| `script_assets` | `ScriptAsset` | Хранилище .gs скриптов в базе данных |
+| `active_collab_integration_tokens` | `ActiveCollabIntegrationToken` | Индивидуальные credentials интеграций; хранится только SHA-256 bearer |
+| `script_assets` | `ScriptAsset` | Архивируемое legacy-хранилище; runtime download использует файл из Git |
 | `users` | `User` | Пользователи Orchid-панели |
 | `roles` | Orchid `Role` | Роли пользователей |
 | `role_users` | — | Связь пользователей с ролями |
@@ -25,10 +27,11 @@ CREATE TABLE active_collab_integrations (
     id                          CHAR(36)         PRIMARY KEY,          -- UUID
     name                        VARCHAR(255)     NOT NULL,
     spreadsheet_id              VARCHAR(255)     NOT NULL UNIQUE,
-    active_collab_base_url      VARCHAR(255)     NOT NULL,
+    connection_id               CHAR(36)         NULL REFERENCES active_collab_connections(id),
+    active_collab_base_url      VARCHAR(255)     NULL,                  -- legacy, migration only
     active_collab_project_id    INT UNSIGNED     NOT NULL,
     active_collab_task_list_id  INT UNSIGNED     NOT NULL,
-    active_collab_api_token     TEXT             NULL,                  -- зашифровано
+    active_collab_api_token     TEXT             NULL,                  -- legacy, зашифровано
     task_list_mapping           JSON             NULL,
     assignee_mapping            JSON             NULL,
     label_mapping               JSON             NULL,
@@ -39,6 +42,26 @@ CREATE TABLE active_collab_integrations (
 );
 ```
 
+Этап 2 добавляет `allow_legacy_token BOOLEAN NOT NULL DEFAULT false`. Флаг задаётся только административной CLI-командой, не включается массовым заполнением или миграцией.
+
+## active_collab_integration_tokens
+
+Таблица содержит UUID, `integration_id` с `RESTRICT` при удалении, имя, уникальный `token_hash CHAR(64)`, `created_at`, `revoked_at` и `last_used_at`. Исходный `sc_…` показывается только один раз при выдаче и никогда не хранится.
+
+`active_collab_task_exports.hash_version` и `active_collab_sync_attempts.hash_version` nullable. Старые хеши остаются без версии; новые legacy попытки используют `legacy-md5-v1`, новый sync — `payload-sha256-v2`. Destination hash включает `connection_id`; переход со старой версии требует одного успешного PUT. Незаполненные старые значения не считаются подтверждёнными для skip.
+
+## active_collab_connections
+
+Содержит общий для нескольких интеграций ActiveCollab endpoint и зашифрованный API token. Интеграция обязана ссылаться на активное подключение через `connection_id`; legacy URL/token и старые переменные окружения используются только контролируемым backfill/remediation и не являются runtime fallback.
+
+| Поле | Описание |
+|------|----------|
+| `id` | UUID подключения |
+| `name` | Имя в административной панели |
+| `base_url` | Нормализованный API URL с `/api/v1` |
+| `api_token` | Зашифрованный Laravel `encrypted` cast token |
+| `active` | Доступно ли подключение для новых операций |
+
 ### Описание столбцов
 
 | Столбец | Тип | NULL | Описание |
@@ -46,10 +69,11 @@ CREATE TABLE active_collab_integrations (
 | `id` | UUID | нет | Первичный ключ (UUID v7, auto-generated) |
 | `name` | string | нет | Человекочитаемое название интеграции |
 | `spreadsheet_id` | string | нет | ID Google Sheets (без URL). Unique — одна таблица = одна интеграция |
-| `active_collab_base_url` | string | нет | AC API base URL, всегда с `/api/v1` (нормализуется при сохранении) |
+| `connection_id` | UUID | да на период миграции | Явно выбранное ActiveCollab connection; runtime без него закрывается |
+| `active_collab_base_url` | string | да | Legacy URL только для migration/remediation; runtime его не использует |
 | `active_collab_project_id` | integer | нет | ID проекта в ActiveCollab |
 | `active_collab_task_list_id` | integer | нет | Дефолтный task list ID в проекте |
-| `active_collab_api_token` | text | да | Токен AC API. Хранится зашифрованным (Laravel `encrypted` cast). Если пустой — используется `ACTIVECOLLAB_API_TOKEN` из `.env` |
+| `active_collab_api_token` | text | да | Legacy token, зашифрованный Laravel `encrypted` cast; runtime не использует и не подменяет глобальным config |
 | `task_list_mapping` | JSON | да | Маппинг `task_type → task_list_id`. Ключи — lowercase строки |
 | `assignee_mapping` | JSON | да | Маппинг `responsible → user_id`. Ключи — exact match строки |
 | `label_mapping` | JSON | да | Маппинг `severity → label_id`. Ключи — lowercase строки |
@@ -98,13 +122,13 @@ CREATE TABLE active_collab_integrations (
 ### Методы модели
 
 ```php
-// Разрешённый base_url: интеграция > config
+// URL разрешается через явно назначенное active connection
 $integration->resolvedBaseUrl(): string
 
 // URL для браузера (без /api/v1)
 $integration->resolvedInstanceUrl(): string
 
-// Токен: интеграция > config
+// Токен берётся только из явно назначенного active connection
 $integration->resolvedApiToken(): string
 ```
 
@@ -221,7 +245,7 @@ Legacy status сохраняется для прежнего UI: pending при 
 
 ## script_assets
 
-Хранит скрипты Google Apps Script в базе данных. Содержимое редактируется через Orchid-панель.
+Legacy-таблица, сохранённая до отдельной contract-миграции. Orchid DB-editor и runtime read/write сняты; строки используются только командой архивации.
 
 ```sql
 CREATE TABLE script_assets (
@@ -241,7 +265,7 @@ CREATE TABLE script_assets (
 | `name` | string | Название для отображения в UI |
 | `content` | longtext | Содержимое .gs файла |
 
-`GoogleAppsScriptService` читает запись с `script_key = 'activecollab_sync.gs'`. Если записи нет, загружает файл из `resources/apps-script/activecollab_sync.gs` и создаёт запись.
+`GoogleAppsScriptService` не читает эту таблицу. `scripts:export-assets` выгружает все строки в private JSON archive без изменения данных; таблицу можно удалить отдельной contract-миграцией только после проверки реального backup и diff.
 
 ---
 

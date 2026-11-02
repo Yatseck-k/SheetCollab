@@ -10,5 +10,7 @@ readonly class ActiveCollabSyncReservation
         public string $exportId,
         public ?string $operationId,
         public ?string $conflictCode = null,
+        public string $action = 'create',
+        public ?int $taskId = null,
     ) {}
 }

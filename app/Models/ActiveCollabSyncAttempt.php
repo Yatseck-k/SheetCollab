@@ -17,7 +17,7 @@ class ActiveCollabSyncAttempt extends Model
     protected $fillable = [
         'export_id', 'integration_id', 'operation_id', 'action', 'status',
         'started_at', 'finished_at', 'http_status', 'error_code', 'error_message',
-        'source_payload', 'active_collab_payload', 'active_collab_response', 'sync_hash',
+        'source_payload', 'active_collab_payload', 'active_collab_response', 'sync_hash', 'hash_version',
     ];
 
     protected $casts = [

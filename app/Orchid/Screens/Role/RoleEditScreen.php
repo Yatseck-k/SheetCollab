@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace App\Orchid\Screens\Role;
 
+use App\Models\ActiveCollabIntegration;
 use App\Orchid\Layouts\Role\RoleEditLayout;
 use App\Orchid\Layouts\Role\RolePermissionLayout;
+use App\Services\AdminAccessManagementService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
 use Orchid\Platform\Models\Role;
 use Orchid\Screen\Action;
@@ -30,6 +34,8 @@ class RoleEditScreen extends Screen
      */
     public function query(Role $role): iterable
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+
         return [
             'role' => $role,
             'permission' => $role->statusOfPermissions(),
@@ -57,15 +63,6 @@ class RoleEditScreen extends Screen
     /**
      * The permissions required to access this screen.
      */
-    /** @return iterable<int, string> */
-    #[\Override]
-    public function permission(): ?iterable
-    {
-        return [
-            'platform.systems.roles',
-        ];
-    }
-
     /**
      * The screen's action buttons.
      *
@@ -111,8 +108,9 @@ class RoleEditScreen extends Screen
     /**
      * @return RedirectResponse
      */
-    public function save(Request $request, Role $role)
+    public function save(Request $request, Role $role, AdminAccessManagementService $access)
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
         $request->validate([
             'role.name' => 'required',
             'role.slug' => [
@@ -121,14 +119,21 @@ class RoleEditScreen extends Screen
             ],
         ]);
 
-        $role->fill($request->get('role'));
-
-        $role->permissions = collect((array) $request->get('permissions'))
+        $before = $this->snapshot($role);
+        $permissions = collect((array) $request->get('permissions'))
             ->map(fn ($value, $key): array => [base64_decode((string) $key) => $value])
             ->collapse()
             ->toArray();
-
-        $role->save();
+        DB::transaction(function () use ($request, $role, $permissions, $access, $before): void {
+            $role->fill($request->get('role'));
+            $role->permissions = $permissions;
+            $role->save();
+            $after = $this->snapshot($role);
+            if ($role->wasRecentlyCreated || $before !== $after) {
+                $access->auditRoleMutation((int) $request->user()->getAuthIdentifier(), $role, $before,
+                    $after, $role->wasRecentlyCreated ? 'role_created' : 'role_updated');
+            }
+        }, 3);
 
         Toast::info(__('Role was saved'));
 
@@ -140,12 +145,26 @@ class RoleEditScreen extends Screen
      *
      * @throws \Exception
      */
-    public function remove(Role $role)
+    public function remove(Role $role, AdminAccessManagementService $access)
     {
-        $role->delete();
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+        DB::transaction(function () use ($role, $access): void {
+            $before = $this->snapshot($role);
+            $access->auditRoleMutation((int) request()->user()->getAuthIdentifier(), $role, $before, [], 'role_deleted');
+            $role->delete();
+        }, 3);
 
         Toast::info(__('Role was removed'));
 
         return redirect()->route('platform.systems.roles');
+    }
+
+    /** @return array<string, mixed> */
+    private function snapshot(Role $role): array
+    {
+        $permissions = array_keys(array_filter((array) $role->permissions, static fn ($value): bool => (bool) $value));
+        sort($permissions);
+
+        return ['role_id' => $role->id, 'name' => $role->name, 'slug' => $role->slug, 'permission_slugs' => $permissions];
     }
 }

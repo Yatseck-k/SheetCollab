@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Data\ActiveCollab\ActiveCollabRecordUuidManifest;
 use App\Data\ActiveCollab\ActiveCollabTaskData;
 use App\Models\ActiveCollabIntegration;
+use App\Models\ActiveCollabIntegrationToken;
 use App\Models\ActiveCollabTaskExport;
 use App\Models\User;
 use App\Services\ActiveCollab\ActiveCollabRecordUuidMigrationService;
@@ -14,6 +15,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Component\Process\Process;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabSyncConcurrencyTest extends TestCase
@@ -34,12 +36,13 @@ class ActiveCollabSyncConcurrencyTest extends TestCase
         $this->assertSame('sheetcollab_concurrency_test', config('database.connections.mariadb.database'));
         $this->artisan('migrate:fresh', ['--force' => true])->assertExitCode(0);
         config()->set('app.key', 'base64:J63P4m4KjJ8l0RkGxJZ4Kf9P9+K6f2R4R6V4a2M1LxQ=');
-        ActiveCollabIntegration::create([
+        $integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Concurrency', 'spreadsheet_id' => 'race-sheet',
             'active_collab_base_url' => 'https://ac.example.test/api/v1',
             'active_collab_api_token' => 'test-ac-secret', 'active_collab_project_id' => 10,
             'active_collab_task_list_id' => 31, 'active' => true,
         ]);
+        $integration->forceFill(['allow_legacy_token' => true])->save();
         $this->directory = sys_get_temp_dir().'/sheetcollab-race-'.bin2hex(random_bytes(8));
         mkdir($this->directory, 0700);
     }
@@ -236,6 +239,34 @@ class ActiveCollabSyncConcurrencyTest extends TestCase
         $this->assertSame(2, ActiveCollabTaskExport::distinct()->count('task_id'));
     }
 
+    public function test_simultaneous_new_sync_requests_for_one_uuid_send_one_post(): void
+    {
+        $integration = ActiveCollabIntegration::firstOrFail();
+        $integration->forceFill(['uuid_only' => true])->save();
+        $token = 'sc_'.str_repeat('b', 64);
+        ActiveCollabIntegrationToken::create(['integration_id' => $integration->id, 'name' => 'race',
+            'token_hash' => hash('sha256', $token), 'created_at' => now()]);
+        $uuid = (string) Str::uuid();
+        $a = $this->startWorker('a', 'sync', 8, $uuid, $token);
+        $b = $this->startWorker('b', 'sync', 8, $uuid, $token);
+        touch($this->directory.'/start');
+        $this->waitUntil(fn (): bool => is_file($this->directory.'/ready-a') || is_file($this->directory.'/ready-b'));
+        $this->waitUntil(fn (): bool => count($this->calls()) === 1);
+        $winnerName = trim($this->calls()[0]);
+        $loser = $winnerName === 'a' ? $b : $a;
+        $this->waitUntil(fn (): bool => ! $loser->isRunning());
+        $loser->wait();
+        $this->assertSame(409, json_decode($loser->getOutput(), true)['status'] ?? null, $loser->getErrorOutput().$loser->getOutput());
+        $this->assertSame('sync_in_progress', json_decode($loser->getOutput(), true)['body']['error']['code'] ?? null);
+        touch($this->directory.'/release');
+        $winner = $winnerName === 'a' ? $a : $b;
+        $winner->wait();
+        $this->assertSame(201, json_decode($winner->getOutput(), true)['status'] ?? null, $winner->getErrorOutput().$winner->getOutput());
+        $this->assertDatabaseCount('active_collab_task_exports', 1);
+        $this->assertDatabaseCount('active_collab_sync_attempts', 1);
+        $this->assertDatabaseHas('active_collab_task_exports', ['record_uuid' => $uuid, 'last_attempt_status' => 'succeeded']);
+    }
+
     #[DataProvider('migrationWriters')]
     public function test_migration_cannot_rebind_an_operation_in_flight(string $action): void
     {
@@ -267,7 +298,10 @@ class ActiveCollabSyncConcurrencyTest extends TestCase
         $this->assertCount(1, $this->calls());
         touch($this->directory.'/release');
         $a->wait();
-        $this->assertSame($action === 'update' ? 200 : 409, json_decode($a->getOutput(), true)['status'] ?? null, $a->getOutput());
+        $this->assertSame($action === 'update' ? 502 : 409, json_decode($a->getOutput(), true)['status'] ?? null, $a->getOutput());
+        if ($action === 'update') {
+            $this->assertSame('unknown', $export->fresh()->last_attempt_status);
+        }
         $retry = app(ActiveCollabRecordUuidMigrationService::class)->migrate($integration->id,
             ActiveCollabRecordUuidManifest::fromArray(json_decode(file_get_contents($this->directory.'/input-b'), true)['manifest']),
             $input['actor_id'], 'Confirmed links after writer stopped', false, true);
@@ -306,12 +340,13 @@ class ActiveCollabSyncConcurrencyTest extends TestCase
         return $export;
     }
 
-    private function startWorker(string $name, string $action, int $row = 8, ?string $uuid = null): Process
+    private function startWorker(string $name, string $action, int $row = 8, ?string $uuid = null, ?string $token = null): Process
     {
         $connection = config('database.connections.mariadb');
         $worker = new Process([PHP_BINARY, base_path('tests/Fixtures/activecollab_sync_worker.php'), $this->directory, $name, $action, (string) $row], base_path(), [
             'APP_ENV' => 'testing', 'APP_KEY' => config('app.key'), 'LOG_CHANNEL' => 'null',
             'SYNC_RECORD_UUID' => $uuid ?? '',
+            'SYNC_BEARER_TOKEN' => $token ?? '',
             'DB_CONNECTION' => 'mariadb', 'DB_DATABASE' => $connection['database'],
             'DB_HOST' => $connection['host'], 'DB_PORT' => (string) $connection['port'],
             'DB_USERNAME' => $connection['username'], 'DB_PASSWORD' => $connection['password'],

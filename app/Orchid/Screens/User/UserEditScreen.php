@@ -4,14 +4,19 @@ declare(strict_types=1);
 
 namespace App\Orchid\Screens\User;
 
+use App\Models\ActiveCollabIntegration;
 use App\Models\User;
 use App\Orchid\Layouts\Role\RolePermissionLayout;
 use App\Orchid\Layouts\User\UserEditLayout;
+use App\Orchid\Layouts\User\UserIntegrationAccessLayout;
 use App\Orchid\Layouts\User\UserPasswordLayout;
 use App\Orchid\Layouts\User\UserRoleLayout;
+use App\Services\AdminAccessManagementService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
 use Orchid\Access\Impersonation;
@@ -36,11 +41,13 @@ class UserEditScreen extends Screen
      */
     public function query(User $user): iterable
     {
-        $user->load(['roles']);
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+        $user->load(['roles', 'activeCollabIntegrations']);
 
         return [
             'user' => $user,
             'permission' => $user->statusOfPermissions(),
+            'integration_access' => $user->activeCollabIntegrations->pluck('id')->all(),
         ];
     }
 
@@ -60,15 +67,6 @@ class UserEditScreen extends Screen
     public function description(): ?string
     {
         return 'User profile and privileges, including their associated role.';
-    }
-
-    /** @return iterable<int, string> */
-    #[\Override]
-    public function permission(): ?iterable
-    {
-        return [
-            'platform.systems.users',
-        ];
     }
 
     /**
@@ -103,6 +101,8 @@ class UserEditScreen extends Screen
      */
     public function layout(): iterable
     {
+        $isAdmin = Gate::allows('assign', ActiveCollabIntegration::class);
+
         return [
 
             Layout::block(UserEditLayout::class)
@@ -149,14 +149,21 @@ class UserEditScreen extends Screen
                         ->method('save')
                 ),
 
+            Layout::block(UserIntegrationAccessLayout::class)
+                ->title('Назначенные интеграции')
+                ->description('Доступ admin к выбранным интеграциям для пользователей с разрешением manager или viewer.')
+                ->commands(Button::make('Сохранить')->type(Color::BASIC)->icon('bs.check-circle')->method('save'))
+                ->canSee($isAdmin),
+
         ];
     }
 
     /**
      * @return RedirectResponse
      */
-    public function save(User $user, Request $request)
+    public function save(User $user, Request $request, AdminAccessManagementService $access)
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
         $request->validate([
             'user.email' => [
                 'required',
@@ -164,21 +171,32 @@ class UserEditScreen extends Screen
             ],
         ]);
 
+        $request->validate([
+            'user.roles' => ['nullable', 'array'],
+            'user.roles.*' => ['integer', 'distinct', 'exists:roles,id'],
+            'integration_access' => ['nullable', 'array'],
+            'integration_access.*' => ['uuid', 'distinct', 'exists:active_collab_integrations,id'],
+        ]);
+
         $permissions = collect((array) $request->get('permissions'))
             ->map(fn ($value, $key): array => [base64_decode((string) $key) => $value])
             ->collapse()
             ->toArray();
 
-        $user->when($request->filled('user.password'), function (Builder $builder) use ($request): void {
-            $builder->getModel()->password = Hash::make($request->input('user.password'));
-        });
+        DB::transaction(function () use ($user, $request, $permissions, $access): void {
+            $user->when($request->filled('user.password'), function (Builder $builder) use ($request): void {
+                $builder->getModel()->password = Hash::make($request->input('user.password'));
+            });
 
-        $user
-            ->fill($request->collect('user')->except(['password', 'permissions', 'roles'])->toArray())
-            ->forceFill(['permissions' => $permissions])
-            ->save();
-
-        $user->replaceRoles($request->input('user.roles'));
+            $user->fill($request->collect('user')->except(['password', 'permissions', 'roles'])->toArray())->save();
+            $access->syncUserAccess(
+                $user,
+                array_values((array) $request->input('user.roles', [])),
+                $permissions,
+                array_values((array) $request->input('integration_access', $user->activeCollabIntegrations()->pluck('id')->all())),
+                (int) $request->user()->getAuthIdentifier(),
+            );
+        }, 3);
 
         Toast::info(__('User was saved.'));
 
@@ -190,9 +208,14 @@ class UserEditScreen extends Screen
      *
      * @throws \Exception
      */
-    public function remove(User $user)
+    public function remove(User $user, AdminAccessManagementService $access)
     {
-        $user->delete();
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+        DB::transaction(function () use ($user, $access): void {
+            $before = $access->userAccessSnapshot($user);
+            $access->auditUserDeletion((int) request()->user()->getAuthIdentifier(), $user, $before);
+            $user->delete();
+        }, 3);
 
         Toast::info(__('User was removed'));
 
@@ -204,6 +227,7 @@ class UserEditScreen extends Screen
      */
     public function loginAs(User $user)
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
         Impersonation::loginAs($user);
 
         Toast::info(__('You are now impersonating this user'));

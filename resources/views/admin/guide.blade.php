@@ -318,7 +318,7 @@
 
         <div class="guide-links">
             <a class="guide-link" href="{{ route('platform.integrations') }}">Интеграции</a>
-            <a class="guide-link" href="{{ route('platform.script') }}">Apps Script</a>
+            <a class="guide-link" href="{{ route('platform.script.download') }}">Apps Script</a>
             <a class="guide-link guide-link--secondary" href="{{ route('platform.exports') }}">История экспортов</a>
         </div>
     </section>
@@ -348,7 +348,7 @@
             <li>Аккаунт ActiveCollab с доступом к нужному проекту.</li>
             <li>ActiveCollab API token пользователя, который может создавать и изменять задачи.</li>
             <li>Публичный HTTPS-адрес SheetCollab, например <code>https://sync.example.com</code>.</li>
-            <li>Интеграционный токен SheetCollab — значение <code>GOOGLE_SHEETS_INTEGRATION_TOKEN</code>.</li>
+            <li>Индивидуальный токен таблицы SheetCollab, выданный администратором через <code>integrations:tokens issue</code>.</li>
         </ul>
 
         <div class="guide-note guide-note--warning">
@@ -381,14 +381,12 @@ Project ID: 10</span>
 
         <h4>2.2. Определите основной Task List</h4>
         <p>
-            Выберите список задач, который будет использоваться по умолчанию, например
-            <code>Bug Tracker</code> или <code>Backlog</code>. При создании интеграции можно:
+            В настройках интеграции выберите существующий список задач выбранного проекта,
+            например <code>Bug Tracker</code> или <code>Backlog</code>:
         </p>
         <ul class="guide-list">
-            <li>указать числовой Task List ID;</li>
-            <li>указать название существующего списка;</li>
-            <li>указать новое название — SheetCollab попробует создать список;</li>
-            <li>оставить поле пустым — будет выбран первый доступный список проекта.</li>
+            <li>выбрать Task List из каталога ActiveCollab для выбранного проекта;</li>
+            <li>использовать числовой ID существующего списка, если он уже известен.</li>
         </ul>
 
         <h4>2.3. Создайте API token</h4>
@@ -402,7 +400,7 @@ Project ID: 10</span>
             <li>просматривать проект и его task lists;</li>
             <li>создавать и изменять задачи;</li>
             <li>просматривать пользователей и labels;</li>
-            <li>создавать task lists, только если вы хотите задавать новый список по названию.</li>
+            <li>создавать и изменять задачи в выбранном проекте.</li>
         </ul>
 
         <h4>2.4. Подготовьте ID для маппингов — необязательно</h4>
@@ -535,11 +533,12 @@ Project ID: 10</span>
         </div>
 
         <ol class="guide-ordered">
-            <li>Откройте раздел <a href="{{ route('platform.integrations') }}">Интеграции</a>.</li>
-            <li>Нажмите <strong>Создать интеграцию</strong>.</li>
-            <li>Заполните вкладку <strong>Основные настройки</strong>.</li>
-            <li>При необходимости заполните вкладку <strong>Маппинги</strong>.</li>
-            <li>Включите флаг <strong>Интеграция включена</strong> и сохраните запись.</li>
+            <li>Создайте или проверьте ActiveCollab connection в разделе <a href="{{ route('platform.connections') }}">Подключения ActiveCollab</a>. Проверка подключения выполняется отдельной кнопкой после сохранения.</li>
+            <li>Откройте <a href="{{ route('platform.integrations') }}">Интеграции</a> и нажмите <strong>Добавить интеграцию</strong>.</li>
+            <li>На шаге <strong>1. Таблица и назначение</strong> укажите имя, Google Sheets URL/ID, сохранённое connection, project ID и при необходимости ID существующего Task List.</li>
+            <li>Сохраните интеграцию. Сохранение не создаёт внешних Task List; проверяйте connection и выбирайте ID уже существующих проектов/списков.</li>
+            <li>На шаге <strong>2. Маппинги</strong> настройте списки задач, ответственных и метки, затем сохраните ещё раз.</li>
+            <li>Назначьте пользователей через Users и выдайте таблице отдельный токен. Token показывается один раз: настройте его в Script Properties вместе с URL сервиса.</li>
         </ol>
 
         <div class="guide-table-wrap">
@@ -563,9 +562,9 @@ Project ID: 10</span>
                         <td><code>https://docs.google.com/spreadsheets/d/...</code></td>
                     </tr>
                     <tr>
-                        <td>ActiveCollab API Base URL</td>
-                        <td>Адрес ActiveCollab. Суффикс <code>/api/v1</code> добавится автоматически.</td>
-                        <td><code>https://ac.example.com/api/v1</code></td>
+                        <td>ActiveCollab connection</td>
+                        <td>Выберите заранее сохранённое подключение с URL и credential. Секрет интеграции не показывается в форме.</td>
+                        <td>Основной ActiveCollab</td>
                     </tr>
                     <tr>
                         <td>Project ID или URL</td>
@@ -573,14 +572,14 @@ Project ID: 10</span>
                         <td><code>10</code></td>
                     </tr>
                     <tr>
-                        <td>Task List ID или название</td>
-                        <td>Основной список задач. Можно оставить пустым для автоматического выбора.</td>
-                        <td><code>Bug Tracker</code></td>
+                        <td>Task List ID</td>
+                        <td>ID уже существующего списка в выбранном проекте; сохранение интеграции не создаёт список.</td>
+                        <td><code>31</code></td>
                     </tr>
                     <tr>
-                        <td>ActiveCollab API Token</td>
-                        <td>Token пользователя ActiveCollab. Можно оставить пустым, если он задан глобально на сервере.</td>
-                        <td><code>••••••••</code></td>
+                        <td>Токен SheetCollab</td>
+                        <td>Выдаётся администратором отдельно для интеграции. Исходное значение показывается только при выпуске.</td>
+                        <td><code>sc_…</code></td>
                     </tr>
                 </tbody>
             </table>
@@ -605,10 +604,10 @@ Project ID: 10</span>
         </ul>
 
         <div class="guide-note guide-note--success">
-            Если Task List задан названием или поле оставлено пустым, при сохранении
-            SheetCollab обращается к ActiveCollab, находит подходящий список и при
-            необходимости создаёт его. Если сохранение завершилось ошибкой, сначала
-            проверьте URL, Project ID, token и права пользователя ActiveCollab.
+            Подключение ActiveCollab создаётся отдельно в разделе «Подключения» и может
+            использоваться несколькими интеграциями. При сохранении интеграции SheetCollab
+            только проверяет существующие проекты и Task Lists; внешние сущности не создаются.
+            Если каталог недоступен, проверьте URL подключения, token и права пользователя.
         </div>
     </section>
 
@@ -620,8 +619,7 @@ Project ID: 10</span>
 
         <ol class="guide-ordered">
             <li>
-                В SheetCollab откройте раздел <a href="{{ route('platform.script') }}">Apps Script</a>
-                и скачайте <code>activecollab_sync.gs</code>.
+                Скачайте канонический <code>activecollab_sync.gs</code> из SheetCollab: <a href="{{ route('platform.script.download') }}">Скачать Apps Script</a>.
             </li>
             <li>
                 Откройте нужную Google-таблицу и выберите
@@ -652,7 +650,7 @@ Project ID: 10</span>
                     </tr>
                     <tr>
                         <td><code>INTEGRATION_SERVICE_TOKEN</code></td>
-                        <td>Точное значение <code>GOOGLE_SHEETS_INTEGRATION_TOKEN</code>, настроенное на сервере SheetCollab.</td>
+                        <td>Индивидуальный токен <code>sc_…</code>, выданный администратором для этой интеграции. Общий токен подходит только временно для ещё не обновлённых legacy-скриптов.</td>
                     </tr>
                 </tbody>
             </table>
@@ -678,8 +676,10 @@ Project ID: 10</span>
         <p>Администратор сначала останавливает синхронизацию и редактирование таблицы, отключает интеграцию,
             проверяет существующие ссылки и выполняет контролируемый перенос с dry-run и аудитом.
             Это требуется и для новой таблицы без истории. Одна установка скрипта не переводит сервер в UUID-режим.</p>
-        <p>Рабочая скачиваемая версия пока хранится в БД. Сохраните её копию, сверьте свои изменения с новым
-            шаблоном и обновите проверенную версию в редакторе перед скачиванием.</p>
+        <p>Канонический исходник скачивается из текущего deployment. Перед обновлением существующих таблиц
+            администратор должен экспортировать прежние DB-версии, сверить пользовательские изменения и
+            вручную установить проверенную версию в каждую согласованную таблицу. Скачивание не обновляет
+            уже установленные Apps Script проекты.</p>
         <p>Колонка <code>SheetCollab UUID</code> создаётся автоматически и скрывается.
             Сортируйте и перемещайте <strong>полные строки вместе с этой колонкой</strong>.
             Сортировка только бизнес-колонок нарушает связь. Не меняйте UUID вручную.</p>
@@ -703,7 +703,7 @@ Project ID: 10</span>
             <li>Заполните минимум <code>Стенд</code>, <code>Раздел</code> и <code>Описание проблемы</code>.</li>
             <li>Если заполняете тип, ответственного или серьёзность, используйте значения из настроенных маппингов.</li>
             <li>Кликните любую ячейку тестовой строки.</li>
-            <li>Выберите <strong>ActiveCollab → Создать задачу</strong>.</li>
+            <li>Выберите <strong>ActiveCollab → Синхронизировать задачу</strong>.</li>
         </ol>
 
         <p>При успешной настройке произойдёт следующее:</p>
@@ -717,9 +717,9 @@ Project ID: 10</span>
 
         <h4>Проверка обновления</h4>
         <p>
-            Измените описание или комментарий в той же строке и выберите
-            <strong>ActiveCollab → Обновить задачу</strong>. Скрипт возьмёт Task ID из
-            сохранённой ссылки. В истории экспорта статус изменится на <strong>Обновлена</strong>.
+            Измените описание или комментарий в той же строке и снова выберите
+            <strong>ActiveCollab → Синхронизировать задачу</strong>. Сервер по UUID выберет create, update
+            или skip; при неизменившемся payload внешний update не выполняется.
         </p>
     </section>
 
@@ -731,20 +731,20 @@ Project ID: 10</span>
 
         <div class="guide-columns">
             <div class="guide-panel">
-                <h4>Создание задачи</h4>
+                <h4>Синхронизация задачи</h4>
                 <ol class="guide-ordered">
                     <li>Заполните новую строку.</li>
                     <li>Выберите её.</li>
-                    <li>Нажмите <strong>Создать задачу</strong>.</li>
-                    <li>Не удаляйте созданную ссылку.</li>
+                    <li>Нажмите <strong>Синхронизировать задачу</strong>.</li>
+                    <li>Не удаляйте UUID и созданную ссылку.</li>
                 </ol>
             </div>
             <div class="guide-panel">
-                <h4>Обновление задачи</h4>
+                <h4>Повторная синхронизация</h4>
                 <ol class="guide-ordered">
                     <li>Измените данные существующей строки.</li>
-                    <li>Убедитесь, что ссылка на задачу сохранена.</li>
-                    <li>Нажмите <strong>Обновить задачу</strong>.</li>
+                    <li>Ссылка должна оставаться в строке, а UUID — уникальным по всей таблице.</li>
+                    <li>Нажмите <strong>Синхронизировать задачу</strong>.</li>
                 </ol>
             </div>
         </div>
@@ -799,9 +799,8 @@ Project ID: 10</span>
             <summary>401 Unauthorized</summary>
             <div>
                 <p>
-                    Значение <code>INTEGRATION_SERVICE_TOKEN</code> не совпадает с
-                    <code>GOOGLE_SHEETS_INTEGRATION_TOKEN</code> на сервере SheetCollab.
-                    После изменения серверной конфигурации очистите Laravel config cache.
+                    Значение <code>INTEGRATION_SERVICE_TOKEN</code> неверно, отозвано или выдано другой таблице.
+                    Попросите администратора проверить интеграцию и выдать scoped token; не вставляйте сюда ActiveCollab API token.
                 </p>
             </div>
         </details>

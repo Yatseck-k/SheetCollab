@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories\ActiveCollab;
 
 use App\Exceptions\ActiveCollabRequestException;
+use App\Models\ActiveCollabConnection;
 use App\Models\ActiveCollabIntegration;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
@@ -55,46 +56,151 @@ class ActiveCollabRepository
         return ['single' => $binding['single'] + ['project_id' => $projectId, 'is_trashed' => $trashed]];
     }
 
-    /** @return array<string, mixed> */
-    public function getTaskLists(): array
+    /** @param array<string, mixed> $payload
+     * @param  list<int>  $labelIds
+     * @return array<string, mixed>
+     */
+    public function syncTask(ActiveCollabIntegration $integration, ?int $taskId, array $payload, array $labelIds): array
     {
-        $projectId = config('services.active_collab.project_id');
+        $path = "/projects/{$integration->active_collab_project_id}/tasks".($taskId !== null ? '/'.$taskId : '');
+        $response = $this->requestWithIntegration($integration, $taskId === null ? 'post' : 'put', $path, $payload);
+        $safe = $this->taskResponse($response, $taskId);
+        $actual = $response->json('single.labels');
+        $ids = [];
+        if (is_array($actual) && array_is_list($actual)) {
+            foreach ($actual as $label) {
+                if (! is_array($label) || ! is_int($label['id'] ?? null) || $label['id'] < 1) {
+                    throw new ActiveCollabRequestException($response->status(), safeResponse: $safe);
+                }
+                $ids[] = $label['id'];
+            }
+        } else {
+            throw new ActiveCollabRequestException($response->status(), safeResponse: $safe);
+        }
+        sort($ids);
+        sort($labelIds);
+        if ($response->json('single.project_id') !== $integration->active_collab_project_id || $response->json('single.is_trashed') !== false
+            || $response->json('single.assignee_id') !== ($payload['assignee_id'] ?? 0) || $ids !== $labelIds) {
+            throw new ActiveCollabRequestException($response->status(), safeResponse: $safe);
+        }
 
-        return $this->getTaskListsForConnection(
-            (string) config('services.active_collab.base_url'),
-            (string) config('services.active_collab.api_token'),
-            (int) $projectId,
-        );
+        return $safe;
     }
 
-    /** @return array<string, mixed> */
-    public function getTaskListsForConnection(string $baseUrl, string $apiToken, int $projectId): array
+    /** @return list<array<string, mixed>> */
+    public function labelsForIntegration(ActiveCollabIntegration $integration): array
     {
-        return $this->requestForConnection('get', $baseUrl, $apiToken, "/projects/{$projectId}/task-lists")->json();
+        $labels = $this->catalog($this->requestWithIntegration($integration, 'get', '/labels/task-labels')->json());
+        $allowed = null;
+        $result = [];
+        foreach ($labels as $label) {
+            if (! is_bool($label['is_global'] ?? null)) {
+                throw new ActiveCollabRequestException();
+            }
+            if (! $label['is_global']) {
+                $allowed ??= $this->project($integration)['label_ids'];
+                if (! in_array($label['id'], $allowed, true)) {
+                    continue;
+                }
+            }
+            $result[] = array_intersect_key($label, array_flip(['id', 'name', 'color', 'is_global']));
+        }
+
+        return $result;
     }
 
-    /** @return array<string, mixed> */
-    public function createTaskListForConnection(
-        string $baseUrl,
-        string $apiToken,
-        int $projectId,
-        string $name,
-    ): array {
-        return $this->requestForConnection('post', $baseUrl, $apiToken, "/projects/{$projectId}/task-lists", [
-            'name' => $name,
-        ])->json();
+    /** @return list<array<string, mixed>> */
+    public function usersForIntegration(ActiveCollabIntegration $integration): array
+    {
+        $members = $this->project($integration)['members'];
+        $users = $this->catalog($this->requestWithIntegration($integration, 'get', '/users')->json(), 'display_name');
+        $result = [];
+        foreach ($users as $user) {
+            if (in_array($user['id'], $members, true)) {
+                $result[] = array_intersect_key($user, array_flip(['id', 'display_name']));
+            }
+        }
+
+        return $result;
     }
 
-    /** @return array<string, mixed> */
-    public function getUsers(): array
+    /** @return list<array<string, mixed>> */
+    public function taskListsForIntegration(ActiveCollabIntegration $integration): array
     {
-        return $this->request('get', '/users')->json();
+        return $this->taskListsForConnection($this->connectionForIntegration($integration), $integration->active_collab_project_id);
     }
 
-    /** @return array<string, mixed> */
-    public function getLabels(): array
+    /** @return list<array{id: int, name: string}> */
+    public function projectsForConnection(ActiveCollabConnection $connection): array
     {
-        return $this->request('get', '/labels')->json();
+        $data = $this->requestWithConnection($connection, 'get', '/projects')->json();
+        if (! is_array($data) || ! array_is_list($data)) {
+            throw new ActiveCollabRequestException();
+        }
+
+        $projects = [];
+        $ids = [];
+        foreach ($data as $project) {
+            if (! is_array($project) || ! is_int($project['id'] ?? null) || $project['id'] < 1
+                || ! is_string($project['name'] ?? null) || ($project['is_trashed'] ?? null) !== false
+                || isset($ids[$project['id']])) {
+                throw new ActiveCollabRequestException();
+            }
+            $ids[$project['id']] = true;
+            $projects[] = ['id' => $project['id'], 'name' => $project['name']];
+        }
+
+        return $projects;
+    }
+
+    /** @return list<array{id: int, name: string}> */
+    public function taskListsForConnection(ActiveCollabConnection $connection, int $projectId): array
+    {
+        $catalog = $this->catalog($this->requestWithConnection($connection, 'get', "/projects/{$projectId}/task-lists")->json());
+
+        return array_map(static fn (array $item): array => ['id' => $item['id'], 'name' => $item['name']], $catalog);
+    }
+
+    /** @return array{members: list<int>, label_ids: list<int>} */
+    private function project(ActiveCollabIntegration $integration): array
+    {
+        $data = $this->requestWithIntegration($integration, 'get', "/projects/{$integration->active_collab_project_id}")->json();
+        if (! is_array($data) || ($data['single']['id'] ?? null) !== $integration->active_collab_project_id
+            || ($data['single']['is_trashed'] ?? null) !== false) {
+            throw new ActiveCollabRequestException();
+        }
+        $members = $data['single']['members'] ?? null;
+        $labels = $data['label_ids'] ?? null;
+        foreach ([$members, $labels] as $ids) {
+            if (! is_array($ids) || ! array_is_list($ids)) {
+                throw new ActiveCollabRequestException();
+            }
+            foreach ($ids as $id) {
+                if (! is_int($id) || $id < 1) {
+                    throw new ActiveCollabRequestException();
+                }
+            }
+        }
+
+        return ['members' => $members, 'label_ids' => $labels];
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function catalog(mixed $data, string $nameKey = 'name'): array
+    {
+        if (! is_array($data) || ! array_is_list($data)) {
+            throw new ActiveCollabRequestException();
+        }
+        $ids = [];
+        foreach ($data as $item) {
+            if (! is_array($item) || ! is_int($item['id'] ?? null) || $item['id'] < 1 || ! is_string($item[$nameKey] ?? null)
+                || isset($ids[$item['id']])) {
+                throw new ActiveCollabRequestException();
+            }
+            $ids[$item['id']] = true;
+        }
+
+        return $data;
     }
 
     /** @param array<string, mixed> $payload */
@@ -104,25 +210,36 @@ class ActiveCollabRepository
         string $path,
         array $payload = [],
     ): Response {
-        return $this->requestForConnection(
-            $method,
-            $integration->resolvedBaseUrl(),
-            $integration->resolvedApiToken(),
-            $path,
-            $payload,
-        );
+        if (! $integration->active) {
+            throw new ActiveCollabRequestException();
+        }
+
+        return $this->requestWithConnection($this->connectionForIntegration($integration), $method, $path, $payload);
     }
 
     /** @param array<string, mixed> $payload */
-    private function request(string $method, string $path, array $payload = []): Response
+    private function requestWithConnection(ActiveCollabConnection $connection, string $method, string $path, array $payload = []): Response
     {
-        return $this->requestForConnection(
-            $method,
-            (string) config('services.active_collab.base_url'),
-            (string) config('services.active_collab.api_token'),
-            $path,
-            $payload,
-        );
+        try {
+            $apiToken = trim((string) $connection->api_token);
+        } catch (\Throwable) {
+            throw new ActiveCollabRequestException();
+        }
+        if (! $connection->active || $apiToken === '' || $connection->base_url === '') {
+            throw new ActiveCollabRequestException();
+        }
+
+        return $this->requestForConnection($method, $connection->base_url, $apiToken, $path, $payload);
+    }
+
+    private function connectionForIntegration(ActiveCollabIntegration $integration): ActiveCollabConnection
+    {
+        $connection = $integration->activeCollabConnection;
+        if (! $connection instanceof ActiveCollabConnection || ! $connection->active) {
+            throw new ActiveCollabRequestException();
+        }
+
+        return $connection;
     }
 
     /** @param array<string, mixed> $payload */

@@ -22,6 +22,9 @@ class DatabaseSeeder extends Seeder
         $adminPermissions = [
             'platform.index' => 1,
             'platform.activecollab.recovery' => 1,
+            'platform.activecollab.admin' => 1,
+            'platform.activecollab.integration.manage' => 1,
+            'platform.activecollab.integration.view' => 1,
             'platform.systems' => 1,
             'platform.systems.index' => 1,
             'platform.systems.roles' => 1,

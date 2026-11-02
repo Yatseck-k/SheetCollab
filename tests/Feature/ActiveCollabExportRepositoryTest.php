@@ -13,6 +13,7 @@ use App\Models\ActiveCollabTaskExport;
 use App\Repositories\ActiveCollab\ActiveCollabExportRepository;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabExportRepositoryTest extends TestCase
@@ -28,7 +29,7 @@ class ActiveCollabExportRepositoryTest extends TestCase
         parent::setUp();
         config()->set('app.key', 'base64:J63P4m4KjJ8l0RkGxJZ4Kf9P9+K6f2R4R6V4a2M1LxQ=');
         $this->repository = new ActiveCollabExportRepository();
-        $this->integration = ActiveCollabIntegration::create([
+        $this->integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Test', 'spreadsheet_id' => 'sheet-abc', 'active_collab_project_id' => 10,
             'active_collab_base_url' => 'https://ac.example.test/api/v1', 'active_collab_task_list_id' => 31, 'active' => true,
         ]);

@@ -6,10 +6,11 @@ mappings.
 
 ## Stack
 
-- PHP 8.5
-- Laravel 13.18
+- PHP 8.5.12
+- Laravel 13.39
 - Orchid Platform 14
-- MariaDB 11.4
+- MariaDB 12.3.3 LTS
+- Node.js 26 LTS with the npm version bundled by Laravel Sail
 - Docker Compose / Laravel Sail for local development
 - Vite 8 + Tailwind CSS 4
 
@@ -39,7 +40,7 @@ Redis is not part of the project runtime. Sessions, cache, and queues use databa
 - `routes/platform.php`:
   Orchid admin routes
 - `resources/apps-script/activecollab_sync.gs`:
-  source template for the Google Apps Script client
+  canonical Google Apps Script client source
 
 ## Local development
 
@@ -49,7 +50,7 @@ The project is Docker-first. `make` wraps all Sail commands.
 
 ```bash
 make up            # build images, start containers, auto-copies .env.example → .env
-make setup         # migrate + seed + npm install + frontend build
+make setup         # migrate + seed + npm dependencies + frontend build
 ```
 
 Or manually with docker compose:
@@ -60,7 +61,7 @@ docker compose up -d --build
 docker compose exec laravel.test composer install
 docker compose exec laravel.test php artisan key:generate
 docker compose exec laravel.test php artisan migrate --seed
-docker compose exec laravel.test npm install
+docker compose exec laravel.test npm ci
 docker compose exec laravel.test npm run build
 ```
 
@@ -97,9 +98,9 @@ make logs                            # follow container logs
 
 ## Apps Script
 
-The canonical script is stored in the database and managed via the Orchid admin at `/admin/script`.
+The canonical Apps Script is `resources/apps-script/activecollab_sync.gs` in Git. The Orchid download link serves the file from the current deployment. Existing bound Google Sheets projects must be updated manually; deploying the file does not change their installed script.
 
-`resources/apps-script/activecollab_sync.gs` is the on-disk template used to seed the DB record on first run.
+Before retiring legacy database storage, archive all `script_assets` rows with `php artisan scripts:export-assets` and review differences. The archive command writes only to private storage and never prints script contents.
 
 The script reads `INTEGRATION_SERVICE_URL` and `INTEGRATION_SERVICE_TOKEN` from Google Apps Script Properties and calls the Laravel API. It does **not** contain the ActiveCollab token.
 
@@ -132,16 +133,17 @@ Important variables in `.env`:
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_SHEETS_INTEGRATION_TOKEN` | Bearer token checked on all API routes |
-| `ACTIVECOLLAB_BASE_URL` | AC API base URL (e.g. `https://app.activecollab.com/460565/api/v1`) |
-| `ACTIVECOLLAB_PROJECT_ID` | default AC project ID |
-| `ACTIVECOLLAB_API_TOKEN` | AC token for helper endpoints (task-lists, users, labels) |
+| `GOOGLE_SHEETS_INTEGRATION_TOKEN` | Temporary bearer for explicitly allowlisted legacy routes; disable after all scripts use individual tokens |
+| `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN` | Master switch for the legacy bearer path (default `true` during migration) |
+| `ACTIVECOLLAB_BASE_URL` | Legacy AC API base URL, used only by controlled connection backfill |
+| `ACTIVECOLLAB_PROJECT_ID` | Legacy default project ID, used only during migration/remediation |
+| `ACTIVECOLLAB_API_TOKEN` | Legacy AC token, used only by controlled connection backfill |
 
-Per-integration settings (base URL, project ID, API token, mappings) are also configurable in the Orchid admin per spreadsheet, overriding these defaults.
+ActiveCollab connections (base URL and token) are managed separately in Orchid and can be shared by integrations. Each spreadsheet integration selects a connection and project; mappings remain integration-specific. The legacy `ACTIVECOLLAB_*` URL/token settings are retained only as an input for the controlled connection backfill, not as runtime defaults.
 
 ## API
 
-All integration routes are protected by Bearer token auth with `GOOGLE_SHEETS_INTEGRATION_TOKEN`.
+The current sync API uses an individual `sc_…` token assigned to one spreadsheet integration. The old routes accept `GOOGLE_SHEETS_INTEGRATION_TOKEN` only when both the integration allowlist and `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN` permit it.
 
 Base prefix:
 
@@ -153,9 +155,9 @@ Endpoints:
 
 - `POST /tasks` — create task
 - `PUT /tasks/{taskId}` — update task
-- `GET /task-lists` — list task lists (uses default AC config)
-- `GET /users` — list users (uses default AC config)
-- `GET /labels` — list labels (uses default AC config)
+- `GET /task-lists` — list task lists for the authenticated integration's selected project
+- `GET /users` — list project members for the authenticated integration
+- `GET /labels` — list labels for the authenticated integration's selected project
 
 Example request:
 

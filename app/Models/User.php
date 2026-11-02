@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Orchid\Filters\Types\Like;
 use Orchid\Filters\Types\Where;
 use Orchid\Filters\Types\WhereDateStartEnd;
@@ -11,6 +12,13 @@ use Orchid\Platform\Models\User as Authenticatable;
 
 class User extends Authenticatable
 {
+    /** @return BelongsToMany<ActiveCollabIntegration, $this> */
+    public function activeCollabIntegrations(): BelongsToMany
+    {
+        return $this->belongsToMany(ActiveCollabIntegration::class, 'active_collab_integration_user', 'user_id', 'integration_id')
+            ->withTimestamps();
+    }
+
     /**
      * The attributes that are mass assignable.
      *

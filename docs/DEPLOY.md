@@ -1,11 +1,55 @@
 # Развертывание на сервере
 
+## Переход скриптов и токенов (этап 2)
+
+1. Сделайте резервную копию БД и остановите writers для таблицы на время установки канонического Apps Script.
+2. Выполните миграцию приложения штатным deploy-процессом. Новые токены и `allow_legacy_token` по умолчанию закрыты; не включайте общий доступ всем интеграциям.
+3. Для каждой уже UUID-перенесённой интеграции с активным назначением выдайте отдельный токен: `php artisan integrations:tokens issue --integration=<UUID> --actor=<USER_ID> --reason="Issue scoped Apps Script credential" --name="<sheet name>"`. Команда показывает plaintext только один раз.
+4. В Script Properties задайте `INTEGRATION_SERVICE_URL` и выданный `INTEGRATION_SERVICE_TOKEN`. Скачайте проверенный `activecollab_sync.gs` из текущего deployment и установите его вручную; уже установленные в Sheets версии автоматически не заменяются.
+5. Проверьте create → update → повтор без изменений (skip) на тестовой интеграции. Проверьте оставшиеся разрешения: `php artisan integrations:tokens legacy-status --actor=<USER_ID> --reason="Review legacy token rollout"`. После перевода всех writers отзовите legacy allowlist каждой интеграции командой `disable-legacy`; затем задайте `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN=false` и обновите config cache. Глобальный флаг блокирует старый bearer независимо от allowlist, индивидуальные `sc_…` токены продолжают работать.
+6. Ротация: выпустить второй токен, заменить Script Property, убедиться в работе, затем отозвать старый `revoke --token-id=<UUID>`. Отзыв до dispatch останавливает вызов; отзыв после возможного HTTP оставляет операцию unknown для ручной сверки.
+
+Все команды требуют recovery/users/roles permissions и причину. `list` не возвращает bearer или hash. Откат на приложение 1.4 выполняйте только при закрытом API: старый код не знает об индивидуальных токенах и флаге запрета legacy. Откат миграции блокируется, пока есть токены, включённый legacy-флаг или версии hash.
+
+## Роли, назначения и отключение legacy bearer (этап 4)
+
+1. Создайте/проверьте Orchid Roles и назначьте permissions: admin — `platform.activecollab.admin`; manager — `platform.activecollab.integration.manage` плюс `platform.activecollab.integration.view`; viewer — `platform.activecollab.integration.view`.
+2. Для каждого manager/viewer в Users назначьте только нужные интеграции. Без membership permission не открывает интеграции; manager может менять mappings, viewer только читает. Connections и destination настройки остаются admin-only.
+3. Дайте administrators текущие recovery/users/roles permissions, нужные для токенов и recovery. Не запускайте DatabaseSeeder в production ради добавления прав.
+4. До перехода всех scripts оставьте `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN=true`. Проверьте разрешённые integrations безопасным inventory: `php artisan integrations:tokens legacy-status --actor=<USER_ID> --reason="Review legacy token rollout"`.
+5. После обновления каждого Apps Script на индивидуальный token отключите его per-integration legacy-доступ через `integrations:tokens disable-legacy`, затем задайте `ACTIVECOLLAB_ALLOW_LEGACY_TOKEN=false` и обновите config cache. Это блокирует общий bearer для всех legacy routes; индивидуальные `sc_…` продолжают работать. Не переключайте флаг до проверки всех writers.
+
+Изменения настроек integrations/connections, Orchid roles/permissions и memberships пишутся в `admin_audit_logs` безопасными полями; rotation сохраняет только признак `credential_changed`, не token/hash. Журнал пока предназначен для аудита/операционного просмотра; отдельный UI аудита относится к следующему Orchid этапу.
+
+## Переход на ActiveCollab connections (этап 3)
+
+1. Сделайте backup БД и остановите все writers/очереди, которые создают или обновляют интеграции и отправляют задачи.
+2. Разверните код и примените миграции: `php artisan migrate --force`. Миграция добавляет таблицу `active_collab_connections` и nullable `connection_id`; старые URL/token поля сохраняются для перехода.
+3. Просмотрите безопасный dry-run: `php artisan integrations:migrate-activecollab-connections`. Он показывает integration ID, host и итог действия, но не token и его fingerprint. Исправьте отсутствующие/нечитаемые credentials до apply.
+4. При остановленных writers выполните `php artisan integrations:migrate-activecollab-connections --apply --writers-stopped`. Повторный запуск идемпотентен. Убедитесь, что для всех рабочих интеграций назначен connection; неразрешимые строки исправляйте вручную через Orchid и повторяйте проверку.
+5. Создайте/проверьте connections в Orchid, назначьте интеграциям connection и существующие project/task list. Runtime не использует старые `ACTIVE_COLLAB_*` URL/token как fallback.
+6. После переключения writers выполните одну синхронизацию ранее подтверждённых записей: старый hash не даёт skip и потребует полный PUT для подтверждения `payload-sha256-v2`.
+
+Переменные `ACTIVECOLLAB_BASE_URL`, `ACTIVECOLLAB_API_TOKEN` и `ACTIVECOLLAB_PROJECT_ID` оставлены только как временные источники backfill/remediation; timeout и sync lease продолжают действовать. Не удаляйте legacy значения и не откатывайте схему, пока не завершён период проверки. Миграция защищает rollback, если connections уже существуют или интеграции на них ссылаются; для возврата к старому коду сначала требуется отдельный согласованный план.
+
 ## Требования
 
 - Docker + Docker Compose plugin
 - Git
+- PHP 8.5 and Composer 2.11 for host-side tooling; Sail supplies PHP, Node.js 26 LTS, and npm in the app container
+- MariaDB 12.3.3 LTS for a fresh deployment or isolated test database
 - домен или tunnel до сервера
 - reverse proxy перед Laravel-контейнером: Nginx, Caddy или Traefik
+
+## Схема базы и migration history
+
+Чистая установка загружает готовый schema snapshot: `database/schema/mariadb-schema.sql` для MariaDB или `database/schema/sqlite-schema.sql` для SQLite. В snapshot включена таблица `migrations` со всеми базовыми migration records, поэтому Laravel не проигрывает эти изменения повторно. После squash исходные PHP migrations доступны в Git history; новые изменения схемы добавляются отдельными файлами в `database/migrations/`.
+
+До первого deploy версии со snapshots каждую существующую БД нужно обновить предыдущим релизом до полного migration head и сделать проверенную резервную копию. После этого новый релиз оставляет полную БД без pending migrations. Старую/частично обновлённую БД или backup нельзя «догнать» snapshots: сначала восстановите предыдущий код с полной историей migrations и примените их до head. Snapshot применяется Laravel только при пустой migration history; не импортируйте его поверх рабочей БД вручную.
+
+Schema snapshot — baseline, а не обратимая миграция. `migrate:rollback` не может откатить этот baseline; для восстановления до squash используйте проверенный backup.
+
+В Sail для snapshot load/dump установлен `mariadb-client`. После изменения `MYSQL_CLIENT` или обновления Sail runtime пересоберите app image командой `docker compose build laravel.test`.
 
 ## 1. Клонирование
 
@@ -73,7 +117,7 @@ FORWARD_DB_PORT=127.0.0.1:3306
 docker compose up -d --build
 docker compose exec laravel.test php artisan key:generate --force
 docker compose exec laravel.test php artisan migrate --force
-docker compose exec laravel.test npm install --ignore-scripts
+docker compose exec laravel.test npm ci --ignore-scripts
 docker compose exec laravel.test npm run build
 docker compose exec laravel.test php artisan config:cache
 docker compose exec laravel.test php artisan route:cache
@@ -105,10 +149,12 @@ curl -I http://127.0.0.1:${APP_PORT}
 
 - `/admin/login` открывается
 - можно войти в Orchid
-- раздел `Apps Script` доступен
+- пункт «Скачать Apps Script» отдаёт `activecollab_sync.gs`
 - раздел `Интеграции` доступен
 
 ## 7. Обновление уже развернутого сервиса
+
+Перед обновлением MariaDB сделайте резервную копию и проверьте восстановление на отдельной базе. Переход с 11.4 на 12.3 — major upgrade; MariaDB 12.3 включает `innodb_snapshot_isolation=ON` по умолчанию. Сначала проверьте приложение и транзакционные сценарии на отдельной копии данных и новом контейнере. Не подключайте обновлённый data volume к старому серверу для downgrade; при проблеме восстановите исходную резервную копию.
 
 ```bash
 cd /opt/sheetcollab
@@ -121,7 +167,7 @@ docker run --rm \
   composer install --no-dev --optimize-autoloader
 docker compose up -d --build
 docker compose exec laravel.test php artisan migrate --force
-docker compose exec laravel.test npm install --ignore-scripts
+docker compose exec laravel.test npm ci --ignore-scripts
 docker compose exec laravel.test npm run build
 docker compose exec laravel.test php artisan config:cache
 docker compose exec laravel.test php artisan route:cache
@@ -183,9 +229,10 @@ docker compose exec laravel.test php artisan view:cache
 ### Перевод одной таблицы
 
 1. Остановить triggers, ручную синхронизацию и редактирование/сортировку таблицы; отключить интеграцию (`active=false`). Сохранить копию таблицы и текущего скрипта. Пауза редактирования — обязанность оператора: сервер/LockService не блокирует Google UI.
-2. Экспортировать содержимое `script_assets` через существующий DB-редактор, сравнить с `resources/apps-script/activecollab_sync.gs`, сохранить полезные custom-изменения после review. Внести проверенный UUID-шаблон в DB-редактор, скачать и установить его в bound Apps Script данной таблицы. Обновление файла в Git само по себе не меняет скачиваемую DB-версию. Остальные таблицы не обновлять молча.
-3. Выполнить меню «Подготовить UUID для переноса». Оно создаёт скрытую колонку `SheetCollab UUID`, сохраняет UUID заполненных строк и показывает JSON, без HTTP/AC. Проверить task-ссылки и сохранить JSON локально, вне public/web root. Манифест содержит только идентификаторы/ссылки, не содержимое задач. Дубликаты сначала сверить; копия становится новой записью только явным действием с очисткой ссылки.
-4. Выполнить dry-run от существующего администратора с тремя permissions recovery/users/roles:
+2. До release, который снимает DB-editor, экспортировать все строки таблицы в private archive: `php artisan scripts:export-assets --output=script-assets-before-git-source.json`. Сохранить archive вне репозитория, сравнить каждую DB-версию с `resources/apps-script/activecollab_sync.gs` и перенести нужные custom changes через review. Команда read-only и не печатает код. Не удалять таблицу до отдельного contract release после проверки backup.
+3. После deployment скачать проверенный Git-файл через «Скачать Apps Script» и отдельно установить его в каждую согласованную bound Google Sheet. Deployment не обновляет уже установленные проекты автоматически; остальные таблицы не менять без отдельной проверки.
+4. Выполнить меню «Подготовить UUID для переноса». Оно создаёт скрытую колонку `SheetCollab UUID`, сохраняет UUID заполненных строк и показывает JSON, без HTTP/AC. Проверить task-ссылки и сохранить JSON локально, вне public/web root. Манифест содержит только идентификаторы/ссылки, не содержимое задач. Дубликаты сначала сверить; копия становится новой записью только явным действием с очисткой ссылки.
+5. Выполнить dry-run от существующего администратора с тремя permissions recovery/users/roles:
 
 ```bash
 make artisan CMD='integrations:migrate-record-uuids --integration=INTEGRATION_UUID --manifest=/path/inside/container/manifest.json --actor=ADMIN_ID --reason="Confirmed task links during editing pause" --dry-run --enable-uuid-only'
@@ -195,9 +242,9 @@ make artisan CMD='integrations:migrate-record-uuids --integration=INTEGRATION_UU
 
 Отчёт: planned/already_bound/unresolved/orphaned/conflicts, uuid_only/applied. Exit 1 означает блокировку/невалидные аргументы. Сопоставление выполняется по подтверждённой полной task-ссылке и integration/project/task ID; row number не служит доказательством. Принимается точная task URL сервиса (допускается trailing slash); другой host, project, query/redirect/неполная ссылка требуют сверки.
 
-5. Разрешить все blockers до apply. Все исторические экспорты этой интеграции должны быть подтверждены; null integration ID для её spreadsheet, чужая история, ambiguous exports, unbound/неполная связь, missing manifest rows и running блокируют переключение. Orphans других таблиц перечисляются, но не переносятся. Unknown с полной подтверждённой связью можно перенести, сохранив unknown и запрет повторного create. Для unbound сначала провести сверку/восстановление 1.3; при необходимости завершить безопасный legacy sync старым скриптом, снова остановить запись и подготовить новый манифест. Не удалять историю и не назначать UUID через SQL ради обхода проверки.
-6. Повторить команду без dry-run. Все UUID/locator/audit/readiness меняются одной транзакцией; без `--enable-uuid-only` идентичности переносятся, но интеграция остаётся на паузе до повторного enable. Даже случайная реактивация такого промежуточного состояния блокирует все legacy-запросы. Ошибка audit откатывает перенос. Идентичный повтор — no-op без новых audit rows; замена существующего UUID запрещена.
-7. Сверить отчёт, UUID и ссылки, убедиться в `uuid_only=true`, активировать интеграцию и разрешить редактирование/синхронизацию новым скриптом. Проверить одну строку: update после перемещения полной строки сохраняет task ID. Если до переноса был unknown, сначала разрешить его отдельно через recovery; UUID-перенос сам его не снимает.
+6. Разрешить все blockers до apply. Все исторические экспорты этой интеграции должны быть подтверждены; null integration ID для её spreadsheet, чужая история, ambiguous exports, unbound/неполная связь, missing manifest rows и running блокируют переключение. Orphans других таблиц перечисляются, но не переносятся. Unknown с полной подтверждённой связью можно перенести, сохранив unknown и запрет повторного create. Для unbound сначала провести сверку/восстановление 1.3; при необходимости завершить безопасный legacy sync старым скриптом, снова остановить запись и подготовить новый манифест. Не удалять историю и не назначать UUID через SQL ради обхода проверки.
+7. Повторить команду без dry-run. Все UUID/locator/audit/readiness меняются одной транзакцией; без `--enable-uuid-only` идентичности переносятся, но интеграция остаётся на паузе до повторного enable. Даже случайная реактивация такого промежуточного состояния блокирует все legacy-запросы. Ошибка audit откатывает перенос. Идентичный повтор — no-op без новых audit rows; замена существующего UUID запрещена.
+8. Сверить отчёт, UUID и ссылки, убедиться в `uuid_only=true`, активировать интеграцию и разрешить редактирование/синхронизацию новым скриптом. Проверить одну строку: update после перемещения полной строки сохраняет task ID. Если до переноса был unknown, сначала разрешить его отдельно через recovery; UUID-перенос сам его не снимает.
 
 Для новой таблицы без истории выполнить ту же проверку с пустым `records: []` и enable при inactive, затем активировать. Новые строки без task-ссылки не создают экспорт/AC-задачу во время переноса. Не включать readiness обычной формой.
 

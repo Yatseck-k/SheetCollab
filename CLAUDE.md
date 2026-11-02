@@ -84,7 +84,7 @@ Attempts store only sanitized source/task fields and whitelisted response `singl
 
 ### Mapping resolution
 
-`task_list_id`, `assignee_id`, `label_id` are resolved in `ActiveCollabMappingService` from the `ActiveCollabIntegration` model (`task_list_mapping`, `assignee_mapping`, `label_mapping` JSON columns), with fallback to `config('services.active_collab.*')`.
+`task_list_id`, `assignee_id`, `label_id` are resolved in `ActiveCollabMappingService` from the `ActiveCollabIntegration` model (`task_list_mapping`, `assignee_mapping`, `label_mapping` JSON columns). ActiveCollab HTTP credentials and host come only from the integration's active `ActiveCollabConnection`; global `ACTIVE_COLLAB_*` settings are migration/backfill inputs only and are never runtime fallback.
 - Missing required mapping → throw `RuntimeException` with a descriptive message.
 - Missing optional mapping → return `null`, skip the field in payload.
 
@@ -121,6 +121,8 @@ HTML with sections: Описание проблемы, Параметры (ul), 
 The UUID template uses a hidden `SheetCollab UUID` column, document locks and a whole-spreadsheet duplicate check. Sort full rows including this column. After HTTP find the unique UUID again before writing the result. Explicit new-copy action resets only the selected copy. Existing DB script versions require export/review/manual update through the editor; changing the bootstrap file alone does not deploy a client update.
 
 Apps Script reads `INTEGRATION_SERVICE_URL` and `INTEGRATION_SERVICE_TOKEN` from Script Properties and calls Laravel. The ActiveCollab token must never appear in Apps Script.
+
+Stage 2 canonical Apps Script calls only `POST /api/tasks/sync` with an integration-scoped `sc_` token. It never sends a task ID/action from the link; the server selects create/update/skip using `(integration_id, record_uuid)`. Global token access to legacy routes is per-integration and default-deny. Token management is via `integrations:tokens` CLI with recovery/users/roles permissions and audit; never print token hashes or keep the issued plaintext.
 
 ## Work Folder Workflow
 

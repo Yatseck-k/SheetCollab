@@ -45,7 +45,8 @@ Http::fake(function () use ($directory, $name) {
 
     $taskId = getenv('SYNC_RECORD_UUID') && $name === 'b' ? 456 : 123;
 
-    return Http::response(['single' => ['id' => $taskId, 'url_path' => '/projects/10/tasks/'.$taskId, 'project_id' => 10, 'is_trashed' => false]]);
+    return Http::response(['single' => ['id' => $taskId, 'url_path' => '/projects/10/tasks/'.$taskId,
+        'project_id' => 10, 'is_trashed' => false, 'assignee_id' => 0, 'labels' => []]]);
 });
 $deadline = microtime(true) + 12;
 while (! is_file($directory.'/start')) {
@@ -82,10 +83,11 @@ if (in_array($action, ['bind', 'verify', 'confirm_absence', 'replace'], true)) {
     exit;
 }
 $kernel = $app->make(Kernel::class);
+$newSync = $action === 'sync';
 $request = Request::create(
-    '/api/integrations/activecollab/tasks'.($action === 'update' ? '/123' : ''),
+    $newSync ? '/api/tasks/sync' : '/api/integrations/activecollab/tasks'.($action === 'update' ? '/123' : ''),
     $action === 'update' ? 'PUT' : 'POST',
-    server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ACCEPT' => 'application/json', 'HTTP_AUTHORIZATION' => 'Bearer concurrency-test-token'],
+    server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ACCEPT' => 'application/json', 'HTTP_AUTHORIZATION' => 'Bearer '.($newSync ? getenv('SYNC_BEARER_TOKEN') : 'concurrency-test-token')],
     content: json_encode([
         'record_uuid' => getenv('SYNC_RECORD_UUID') ?: null,
         'spreadsheet_id' => 'race-sheet', 'sheet_id' => '0', 'row_number' => (int) $row,

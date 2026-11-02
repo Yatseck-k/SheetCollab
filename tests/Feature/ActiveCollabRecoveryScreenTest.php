@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
-use App\Models\ActiveCollabIntegration;
 use App\Models\ActiveCollabTaskExport;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -12,6 +11,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Orchid\Platform\Models\Role;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabRecoveryScreenTest extends TestCase
@@ -26,7 +26,7 @@ class ActiveCollabRecoveryScreenTest extends TestCase
     {
         parent::setUp();
         config()->set('app.key', 'base64:J63P4m4KjJ8l0RkGxJZ4Kf9P9+K6f2R4R6V4a2M1LxQ=');
-        $integration = ActiveCollabIntegration::create([
+        $integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Private integration', 'spreadsheet_id' => 'ui-sheet',
             'active_collab_project_id' => 10, 'active_collab_task_list_id' => 31,
             'active_collab_base_url' => 'https://ac.example.test/api/v1',

@@ -22,13 +22,25 @@ class ActiveCollabDataSanitizer
     /**
      * Callers supply source/task whitelists or validated upstream single fields, never raw response/headers.
      *
-     * @param  array<string, mixed>  $values
-     * @return array<string, mixed>
+     * @param  array<array-key, mixed>  $values
+     * @param  list<string>  $extraSecrets
+     * @return array<array-key, mixed>
      */
-    public function clean(array $values, ActiveCollabIntegration $integration): array
+    public function clean(array $values, ActiveCollabIntegration $integration, array $extraSecrets = []): array
     {
+        try {
+            $connectionToken = $integration->resolvedApiToken();
+        } catch (\LogicException) {
+            $connectionToken = '';
+        }
+        try {
+            $legacyToken = (string) $integration->active_collab_api_token;
+        } catch (\Throwable) { // @phpstan-ignore catch.neverThrown (The encrypted legacy cast can fail at runtime.)
+            $legacyToken = '';
+        }
         $tokens = array_values(array_filter([
-            $integration->resolvedApiToken(), (string) config('services.active_collab.api_token'),
+            ...$extraSecrets, $connectionToken, $legacyToken,
+            (string) config('services.active_collab.api_token'),
             (string) config('services.google_sheets.integration_token'),
         ], fn (string $value): bool => $value !== ''));
         array_walk_recursive($values, static function (&$value) use ($tokens): void {

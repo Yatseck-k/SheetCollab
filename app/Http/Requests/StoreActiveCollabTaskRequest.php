@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
+use App\Data\ActiveCollab\ActiveCollabTaskData;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreActiveCollabTaskRequest extends FormRequest
@@ -44,12 +45,8 @@ class StoreActiveCollabTaskRequest extends FormRequest
             $this->merge(['record_uuid' => strtolower(trim($this->input('record_uuid'))) ?: null]);
         }
 
-        $spreadsheetId = (string) $this->input('spreadsheet_id', '');
-
-        if (preg_match('#/spreadsheets/d/([a-zA-Z0-9_-]+)#', $spreadsheetId, $matches) === 1) {
-            $this->merge([
-                'spreadsheet_id' => $matches[1],
-            ]);
+        if (is_string($this->input('spreadsheet_id'))) {
+            $this->merge(['spreadsheet_id' => ActiveCollabTaskData::normalizeSpreadsheetId($this->input('spreadsheet_id'))]);
         }
     }
 }

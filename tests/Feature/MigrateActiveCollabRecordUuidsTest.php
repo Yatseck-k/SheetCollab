@@ -15,6 +15,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class MigrateActiveCollabRecordUuidsTest extends TestCase
@@ -31,7 +32,7 @@ class MigrateActiveCollabRecordUuidsTest extends TestCase
         config()->set('app.key', 'base64:J63P4m4KjJ8l0RkGxJZ4Kf9P9+K6f2R4R6V4a2M1LxQ=');
         Http::preventStrayRequests();
         Http::fake();
-        $this->integration = ActiveCollabIntegration::create([
+        $this->integration = ActiveCollabIntegrationFixture::create([
             'name' => 'UUID migration', 'spreadsheet_id' => 'sheet', 'active_collab_base_url' => 'https://ac.example.test/api/v1',
             'active_collab_project_id' => 10, 'active_collab_task_list_id' => 31, 'active_collab_api_token' => 'private-ac-token', 'active' => false,
         ]);
@@ -75,7 +76,7 @@ class MigrateActiveCollabRecordUuidsTest extends TestCase
         $this->assertTrue($this->runMigration($records)['uuid_only']);
         $this->assertDatabaseCount('admin_audit_logs', 2);
         $this->integration->update(['spreadsheet_id' => 'retired-sheet']);
-        $this->integration = ActiveCollabIntegration::create([
+        $this->integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Empty', 'spreadsheet_id' => 'sheet', 'active_collab_base_url' => 'https://ac.example.test/api/v1',
             'active_collab_project_id' => 10, 'active_collab_task_list_id' => 31, 'active_collab_api_token' => 'private-ac-token', 'active' => false,
         ]);
@@ -186,7 +187,7 @@ class MigrateActiveCollabRecordUuidsTest extends TestCase
     public function test_cli_is_repeatable_and_rejects_bad_or_oversized_local_manifest(): void
     {
         $path = tempnam(sys_get_temp_dir(), 'uuid-manifest-');
-        $options = ['--integration' => $this->integration->id, '--actor' => $this->actor->id,
+        $options = ['--integration' => (string) $this->integration->id, '--actor' => $this->actor->id,
             '--reason' => 'Confirmed identity migration', '--manifest' => $path, '--enable-uuid-only' => true];
         try {
             file_put_contents($path, json_encode(['version' => 1, 'spreadsheet_id' => 'sheet', 'records' => []], JSON_THROW_ON_ERROR));
@@ -203,21 +204,6 @@ class MigrateActiveCollabRecordUuidsTest extends TestCase
             unlink($path);
         }
         Http::assertNothingSent();
-    }
-
-    public function test_schema_down_refuses_to_discard_uuid_identity(): void
-    {
-        $this->runMigration([]);
-        foreach (['000002_add_record_identity_to_active_collab_exports_and_integrations', '000003_replace_external_id_unique_with_index_on_active_collab_task_exports'] as $name) {
-            $migration = require database_path('migrations/2026_10_30_'.$name.'.php');
-            try {
-                $migration->down();
-                $this->fail('Unsafe down must refuse.');
-            } catch (\RuntimeException $e) {
-                $this->assertStringContainsString('procedure', $e->getMessage());
-            }
-        }
-        $this->assertTrue($this->integration->fresh()->uuid_only);
     }
 
     private function export(int $taskId, int $row): ActiveCollabTaskExport

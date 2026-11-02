@@ -30,7 +30,12 @@ class ActiveCollabRecoveryService
         $integration = $snapshot['integration'];
         $attempts = [];
         foreach ($snapshot['attempts'] as $attempt) {
-            $attempts[] = $attempt->only(['id', 'operation_id', 'action', 'status', 'error_code', 'http_status', 'started_at', 'finished_at']);
+            $item = $attempt->only(['id', 'operation_id', 'action', 'status', 'error_code', 'http_status', 'started_at', 'finished_at']);
+            $candidate = $attempt->active_collab_response['single'] ?? [];
+            $item['candidate_task_id'] = $candidate['id'] ?? null;
+            $item['candidate_task_url'] = isset($candidate['url_path']) && $integration->connection_id !== null
+                ? $integration->resolvedInstanceUrl().$candidate['url_path'] : null;
+            $attempts[] = $this->sanitizer->clean($item, $integration);
         }
 
         return ['export' => $this->sanitizer->clean($export->only([
@@ -58,7 +63,11 @@ class ActiveCollabRecoveryService
         if ($this->exports->replayRecovery($actorId, $exportId, $data, $reason)) {
             return $this->exports->recoveryResult($data->requestId);
         }
-        $destination = ['integration_id' => $integration->id, 'project_id' => $integration->active_collab_project_id,
+        if ($integration->connection_id === null || $integration->activeCollabConnection?->active !== true) {
+            throw new TaskSyncConflictException('recovery_conflict', $export->operation_id);
+        }
+        $destination = ['integration_id' => $integration->id, 'connection_id' => (string) $integration->connection_id,
+            'project_id' => $integration->active_collab_project_id,
             'base_url' => $integration->resolvedBaseUrl(), 'api_token' => $integration->resolvedApiToken()];
         $taskData = null;
         if ($data->action === 'replace') {

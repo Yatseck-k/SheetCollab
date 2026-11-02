@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabRecoveryTest extends TestCase
@@ -44,7 +45,7 @@ class ActiveCollabRecoveryTest extends TestCase
             'platform.index' => true, 'platform.activecollab.recovery' => true,
             'platform.systems.users' => true, 'platform.systems.roles' => true,
         ]]);
-        $this->integration = ActiveCollabIntegration::create([
+        $this->integration = ActiveCollabIntegrationFixture::create([
             'name' => 'Recovery', 'spreadsheet_id' => 'recover-sheet', 'active_collab_project_id' => 10,
             'active_collab_base_url' => 'https://ac.example.test/api/v1', 'active_collab_api_token' => 'recovery-secret',
             'active_collab_task_list_id' => 31, 'active' => true,
@@ -153,7 +154,10 @@ class ActiveCollabRecoveryTest extends TestCase
             $this->service->recover($this->admin->id, $this->export->id, $this->data('verify'));
         } catch (TaskSyncConflictException) {
         }
-        $this->assertSame('unknown', $this->export->fresh()->last_attempt_status);
+        $this->assertDatabaseHas('active_collab_task_exports', [
+            'id' => $this->export->id,
+            'last_attempt_status' => 'unknown',
+        ]);
         $this->expectException(TaskSyncConflictException::class);
         $this->service->recover($this->admin->id, $this->export->id, $this->data('replace'));
     }
@@ -285,12 +289,12 @@ class ActiveCollabRecoveryTest extends TestCase
         $this->assertStringNotContainsString('recovery-secret', $serialized);
     }
 
-    public function test_global_credential_change_during_read_does_not_pass_context_validation(): void
+    public function test_connection_credential_change_during_read_does_not_pass_context_validation(): void
     {
-        $this->integration->update(['active_collab_api_token' => null]);
-        config()->set('services.active_collab.api_token', 'initial-global-secret');
+        $connection = $this->integration->activeCollabConnection;
+        $connection->update(['api_token' => 'initial-connection-secret']);
         Http::fake(function () {
-            config()->set('services.active_collab.api_token', 'changed-global-secret');
+            $this->integration->activeCollabConnection->update(['api_token' => 'changed-connection-secret']);
 
             return Http::response($this->task());
         });

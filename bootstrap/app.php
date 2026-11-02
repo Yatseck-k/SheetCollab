@@ -7,11 +7,14 @@ use App\Exceptions\IntegrationNotFoundException;
 use App\Exceptions\TaskAlreadyExistsException;
 use App\Exceptions\TaskBindingConflictException;
 use App\Exceptions\TaskSyncConflictException;
+use App\Http\Middleware\AuthenticateActiveCollabIntegration;
+use App\Http\Middleware\LimitActiveCollabSyncRequest;
 use App\Http\Middleware\VerifyIntegrationToken;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -23,12 +26,23 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'integration.token' => VerifyIntegrationToken::class,
+            'activecollab.token' => AuthenticateActiveCollabIntegration::class,
+            'activecollab.limit' => LimitActiveCollabSyncRequest::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+
+        $exceptions->render(function (ValidationException $e, Request $request) {
+            if ($request->is('api/tasks/sync')) {
+                return response()->json(['error' => ['code' => 'invalid_request', 'message' => 'Некорректные данные запроса.',
+                    'operation_id' => null, 'retryable' => false], 'errors' => $e->errors()], 422);
+            }
+
+            return null;
+        });
 
         $exceptions->render(function (IntegrationNotFoundException $e) {
             return response()->json(['message' => $e->getMessage()], 404);
@@ -38,7 +52,7 @@ return Application::configure(basePath: dirname(__DIR__))
             return response()->json([
                 'message' => $e->getMessage(),
                 'error' => ['code' => $e->errorCode, 'message' => $e->getMessage(),
-                    'operation_id' => $e->operationId, 'retryable' => false],
+                    'operation_id' => $e->operationId, 'retryable' => $e->retryable],
             ], $e->httpStatus);
         });
 

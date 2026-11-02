@@ -43,6 +43,8 @@ class ActiveCollabTaskBodyBuilder
             ? '<h3>Комментарий</h3><p>'.nl2br(htmlspecialchars($data->comment, ENT_QUOTES)).'</p>'
             : '';
 
+        $sourceUrl = htmlspecialchars('https://docs.google.com/spreadsheets/d/'.rawurlencode($data->spreadsheetId).'/edit#gid='.rawurlencode($data->sheetId).'&range=A'.$data->rowNumber, ENT_QUOTES);
+
         return trim(<<<HTML
 <h3>Описание проблемы</h3>
 <p>{$description}</p>
@@ -53,8 +55,8 @@ class ActiveCollabTaskBodyBuilder
   <li><strong>Приоритет:</strong> {$this->val($data->priority)}</li>
   <li><strong>Устройство:</strong> {$this->val($data->device)}</li>
   <li><strong>Разрешение:</strong> {$this->val($data->resolution)}</li>
-  <li><strong>Стенд:</strong> {$data->environment}</li>
-  <li><strong>Раздел:</strong> {$data->section}</li>
+  <li><strong>Стенд:</strong> {$this->val($data->environment)}</li>
+  <li><strong>Раздел:</strong> {$this->val($data->section)}</li>
   <li><strong>Тип задач:</strong> {$this->val($data->taskType)}</li>
   <li><strong>Ответственный:</strong> {$this->val($data->responsible)}</li>
   <li><strong>Постановщик:</strong> {$this->val($data->reporter)}</li>
@@ -65,12 +67,12 @@ class ActiveCollabTaskBodyBuilder
 {$commentHtml}
 
 <hr>
-<p>Источник: Google Sheets, строка {$data->rowNumber}.</p>
+<p>Источник: <a href="{$sourceUrl}">Google Sheets</a>, строка {$data->rowNumber}.</p>
 HTML);
     }
 
     private function val(?string $value): string
     {
-        return $value ?: '—';
+        return htmlspecialchars($value ?: '—', ENT_QUOTES);
     }
 }

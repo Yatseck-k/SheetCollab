@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace App\Services\ActiveCollab;
 
+use App\Models\ActiveCollabConnection;
 use App\Models\ActiveCollabIntegration;
+use App\Repositories\ActiveCollab\ActiveCollabConnectionRepository;
 use App\Repositories\ActiveCollab\ActiveCollabRepository;
+use Illuminate\Validation\ValidationException;
 
 class ActiveCollabIntegrationSettingsService
 {
     public function __construct(
         private readonly ActiveCollabRepository $repository,
+        private readonly ActiveCollabConnectionRepository $connections,
     ) {}
 
     /**
@@ -19,30 +23,51 @@ class ActiveCollabIntegrationSettingsService
      */
     public function prepareForStorage(array $data, ?ActiveCollabIntegration $existing = null): array
     {
-        $baseUrl = $this->normalizeBaseUrl(
-            $this->valueOrExisting($data, 'active_collab_base_url', $existing?->active_collab_base_url)
-        );
+        $existingConnectionId = $existing instanceof ActiveCollabIntegration ? $existing->connection_id : null;
+        $connectionId = trim((string) ($data['connection_id'] ?? $existingConnectionId ?? ''));
+        $connection = $connectionId !== '' ? $this->connections->findActive($connectionId) : null;
+        if (! $connection instanceof ActiveCollabConnection) {
+            throw ValidationException::withMessages(['connection_id' => 'Выберите активное подключение ActiveCollab.']);
+        }
 
         $projectId = $this->normalizeProjectId(
-            $this->valueOrExisting($data, 'active_collab_project_id', $existing?->active_collab_project_id)
+            $this->valueOrExisting($data, 'active_collab_project_id', $existing?->active_collab_project_id),
+        );
+        $projects = $this->repository->projectsForConnection($connection);
+        if (! in_array($projectId, array_column($projects, 'id'), true)) {
+            throw ValidationException::withMessages(['active_collab_project_id' => 'Проект не найден среди доступных проектов выбранного подключения.']);
+        }
+        $taskLists = $this->repository->taskListsForConnection($connection, $projectId);
+        $taskListId = $this->resolveTaskListId(
+            $this->valueOrExisting($data, 'active_collab_task_list_id', $existing?->active_collab_task_list_id),
+            $taskLists,
         );
 
-        $token = $this->resolveApiToken(
-            $this->valueOrExisting($data, 'active_collab_api_token', $existing?->active_collab_api_token)
-        );
+        $candidate = new ActiveCollabIntegration();
+        $candidate->forceFill([
+            'connection_id' => $connection->id,
+            'active_collab_project_id' => $projectId,
+            'active' => true,
+        ]);
+        $candidate->setRelation('activeCollabConnection', $connection);
+        $this->assertMappingIds($data['task_list_mapping'] ?? null, array_column($taskLists, 'id'), 'task_list_mapping');
+        if (! empty($data['assignee_mapping'])) {
+            $this->assertMappingIds($data['assignee_mapping'],
+                array_column($this->repository->usersForIntegration($candidate), 'id'), 'assignee_mapping');
+        }
+        if (! empty($data['label_mapping'])) {
+            $this->assertMappingIds($data['label_mapping'],
+                array_column($this->repository->labelsForIntegration($candidate), 'id'), 'label_mapping');
+        }
+
+        unset($data['active_collab_base_url'], $data['active_collab_api_token']);
 
         return [
             ...$data,
+            'connection_id' => $connection->id,
             'spreadsheet_id' => $this->normalizeSpreadsheetId((string) ($data['spreadsheet_id'] ?? '')),
-            'active_collab_base_url' => $baseUrl,
             'active_collab_project_id' => $projectId,
-            'active_collab_task_list_id' => $this->resolveTaskListId(
-                $data['active_collab_task_list_id'] ?? $existing?->active_collab_task_list_id,
-                $baseUrl,
-                $token,
-                $projectId,
-            ),
-            'active_collab_api_token' => $token,
+            'active_collab_task_list_id' => $taskListId,
         ];
     }
 
@@ -51,7 +76,7 @@ class ActiveCollabIntegrationSettingsService
         $value = trim($value);
 
         if ($value === '') {
-            throw new \InvalidArgumentException('Укажите Google Sheets ID или полную ссылку на таблицу.');
+            throw ValidationException::withMessages(['spreadsheet_id' => 'Укажите Google Sheets ID или полную ссылку на таблицу.']);
         }
 
         if (preg_match('#/spreadsheets/d/([a-zA-Z0-9_-]+)#', $value, $matches) === 1) {
@@ -61,20 +86,6 @@ class ActiveCollabIntegrationSettingsService
         return $value;
     }
 
-    public function normalizeBaseUrl(?string $value): string
-    {
-        $value = $this->normalizeUrl($value ?: (string) config('services.active_collab.base_url'));
-        $value = preg_replace('#/projects/\d+.*$#', '', $value) ?? $value;
-
-        if (preg_match('#/api/v\d+$#', $value) === 1) {
-            return $value;
-        }
-
-        $value = preg_replace('#/api/v\d+.*$#', '', $value) ?? $value;
-
-        return $value.'/api/v1';
-    }
-
     public function normalizeProjectId(string|int|null $value): int
     {
         if (is_int($value) && $value > 0) {
@@ -82,52 +93,7 @@ class ActiveCollabIntegrationSettingsService
         }
 
         $value = trim((string) $value);
-
-        if ($value === '') {
-            $value = (string) config('services.active_collab.project_id');
-        }
-
         if (preg_match('#/projects/(\d+)#', $value, $matches) === 1) {
-            return (int) $matches[1];
-        }
-
-        if (ctype_digit($value) && (int) $value > 0) {
-            return (int) $value;
-        }
-
-        throw new \InvalidArgumentException('Project ID должен быть числом или ссылкой на проект ActiveCollab.');
-    }
-
-    public function resolveApiToken(?string $value): string
-    {
-        $value = trim((string) $value);
-
-        if ($value !== '') {
-            return $value;
-        }
-
-        $value = trim((string) config('services.active_collab.api_token'));
-
-        if ($value !== '') {
-            return $value;
-        }
-
-        throw new \InvalidArgumentException('Укажите ActiveCollab API Token или задайте ACTIVECOLLAB_API_TOKEN в .env.');
-    }
-
-    public function resolveTaskListId(
-        string|int|null $value,
-        string $baseUrl,
-        string $token,
-        int $projectId,
-    ): int {
-        if (is_int($value) && $value > 0) {
-            return $value;
-        }
-
-        $value = trim((string) $value);
-
-        if (preg_match('#/task-lists/(\d+)#', $value, $matches) === 1) {
             return (int) $matches[1];
         }
 
@@ -135,39 +101,49 @@ class ActiveCollabIntegrationSettingsService
             return (int) $value;
         }
 
-        $taskLists = $this->repository->getTaskListsForConnection($baseUrl, $token, $projectId);
+        throw ValidationException::withMessages(['active_collab_project_id' => 'Project ID должен быть числом или ссылкой на проект ActiveCollab.']);
+    }
+
+    /** @param list<array{id: int, name: string}> $taskLists */
+    private function resolveTaskListId(mixed $value, array $taskLists): int
+    {
+        $value = trim((string) $value);
+        if ($value !== '' && preg_match('#/task-lists/(\d+)#', $value, $matches) === 1) {
+            $value = $matches[1];
+        }
+
+        if ($value !== '' && ctype_digit($value)) {
+            $id = (int) $value;
+            foreach ($taskLists as $taskList) {
+                if ($taskList['id'] === $id) {
+                    return $id;
+                }
+            }
+
+            throw ValidationException::withMessages(['active_collab_task_list_id' => 'Task List не найден в выбранном проекте.']);
+        }
 
         if ($value !== '') {
-            $taskListId = $this->findTaskListIdByName($taskLists, $value);
-
-            if ($taskListId !== null) {
-                return $taskListId;
+            foreach ($taskLists as $taskList) {
+                if (mb_strtolower(trim($taskList['name'])) === mb_strtolower($value)) {
+                    return $taskList['id'];
+                }
             }
 
-            $createdTaskList = $this->repository->createTaskListForConnection($baseUrl, $token, $projectId, $value);
-            $taskListId = $this->extractFirstId($createdTaskList);
-
-            if ($taskListId !== null) {
-                return $taskListId;
-            }
-
-            throw new \InvalidArgumentException('Не удалось создать Task List в ActiveCollab. Проверьте права доступа и ответ API.');
+            throw ValidationException::withMessages(['active_collab_task_list_id' => 'Task List с таким названием не найден. Создайте его в ActiveCollab отдельно и выберите существующий список.']);
         }
 
-        $taskListId = $this->extractFirstId($taskLists);
-
-        if ($taskListId !== null) {
-            return $taskListId;
+        if (isset($taskLists[0]['id'])) {
+            return $taskLists[0]['id'];
         }
 
-        throw new \InvalidArgumentException('Не удалось определить Task List ID автоматически. Укажите его вручную.');
+        throw ValidationException::withMessages(['active_collab_task_list_id' => 'В выбранном проекте нет Task Lists. Создайте список в ActiveCollab отдельно.']);
     }
 
     /** @param array<string, mixed> $data */
     private function valueOrExisting(array $data, string $key, mixed $existingValue): mixed
     {
         $value = $data[$key] ?? null;
-
         if (is_string($value) && trim($value) === '') {
             return $existingValue;
         }
@@ -175,66 +151,18 @@ class ActiveCollabIntegrationSettingsService
         return $value ?? $existingValue;
     }
 
-    private function normalizeUrl(string $value): string
+    /** @param array<string, mixed>|null $mapping
+     * @param  list<int>  $availableIds
+     */
+    private function assertMappingIds(?array $mapping, array $availableIds, string $field): void
     {
-        $value = rtrim(trim($value), '/');
-
-        if ($value === '') {
-            throw new \InvalidArgumentException('Укажите корректный URL ActiveCollab.');
-        }
-
-        if (! preg_match('#^https?://#', $value)) {
-            throw new \InvalidArgumentException('URL ActiveCollab должен начинаться с http:// или https://.');
-        }
-
-        return $value;
-    }
-
-    /** @param array<string, mixed> $payload */
-    private function extractFirstId(array $payload): ?int
-    {
-        if (isset($payload['id']) && is_numeric($payload['id'])) {
-            return (int) $payload['id'];
-        }
-
-        foreach ($payload as $value) {
-            if (is_array($value)) {
-                $id = $this->extractFirstId($value);
-
-                if ($id !== null) {
-                    return $id;
-                }
+        foreach ($mapping ?? [] as $value) {
+            if (! is_int($value) && ! (is_string($value) && ctype_digit($value))) {
+                throw ValidationException::withMessages([$field => 'Значения маппинга должны быть ID из выбранного проекта.']);
+            }
+            if (! in_array((int) $value, $availableIds, true)) {
+                throw ValidationException::withMessages([$field => 'Один из ID маппинга не найден в выбранном проекте.']);
             }
         }
-
-        return null;
-    }
-
-    /** @param array<string, mixed> $payload */
-    private function findTaskListIdByName(array $payload, string $name): ?int
-    {
-        $normalizedName = mb_strtolower(trim($name));
-
-        foreach ($payload as $value) {
-            if (! is_array($value)) {
-                continue;
-            }
-
-            if (
-                isset($value['name'], $value['id']) &&
-                is_numeric($value['id']) &&
-                mb_strtolower(trim((string) $value['name'])) === $normalizedName
-            ) {
-                return (int) $value['id'];
-            }
-
-            $nestedId = $this->findTaskListIdByName($value, $name);
-
-            if ($nestedId !== null) {
-                return $nestedId;
-            }
-        }
-
-        return null;
     }
 }

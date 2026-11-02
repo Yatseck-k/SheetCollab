@@ -149,7 +149,7 @@ Redis отсутствует. Сессии, кеш и очереди работ�
 |-------|---------|-----------|
 | `ActiveCollabIntegration` | `active_collab_integrations` | настройки интеграции для таблицы |
 | `ActiveCollabTaskExport` | `active_collab_task_exports` | журнал синхронизаций строк |
-| `ScriptAsset` | `script_assets` | хранилище .gs скриптов в БД |
+| `ScriptAsset` | `script_assets` | архивируемые legacy-строки; только CLI export, не runtime source |
 | `User` | `users` | пользователи Orchid-панели |
 
 ### Exceptions
@@ -167,7 +167,7 @@ Redis отсутствует. Сессии, кеш и очереди работ�
 | `IntegrationListScreen` | `/admin/integrations` | список интеграций |
 | `IntegrationEditScreen` | `/admin/integrations/{id}/edit` | создание и редактирование интеграции |
 | `ExportListScreen` | `/admin/exports` | история экспортов |
-| `ScriptEditorScreen` | `/admin/script` | редактор Google Apps Script |
+| `GoogleAppsScriptService` | `/admin/script/download` | download Git-файла текущего deployment |
 | `GuideScreen` | `/admin/guide` | инструкция |
 | `UserListScreen` | `/admin/users` | управление пользователями |
 | `UserEditScreen` | `/admin/users/{id}/edit` | редактирование пользователя |

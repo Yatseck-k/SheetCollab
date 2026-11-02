@@ -2,7 +2,7 @@
 
 ## Обзор
 
-Проект использует PHPUnit 12.5 с двумя suite:
+Проект использует PHPUnit 13.4 с двумя suite:
 
 | Suite | Директория | Назначение |
 |-------|-----------|-----------|
@@ -29,7 +29,9 @@
 | `LOG_CHANNEL` | `null` | Логи подавлены |
 | `BCRYPT_ROUNDS` | `4` | Быстрое хеширование паролей |
 
-Feature-тесты с БД используют трейт `RefreshDatabase` — таблицы создаются перед каждым тестом через миграции, после теста — откатываются.
+Feature-тесты с БД используют трейт `RefreshDatabase`. Laravel загружает `database/schema/sqlite-schema.sql` с полной базовой migration history; новые migration files, добавленные после baseline, выполняются поверх snapshot.
+
+MariaDB использует отдельный baseline `database/schema/mariadb-schema.sql`. Оба snapshots созданы после replay исходной истории и содержат migration records. При добавлении следующей migration не редактируйте snapshots вручную: добавьте обычный migration-файл, примените его на обоих поддерживаемых драйверах и обновите snapshots командой `php artisan schema:dump --database=sqlite` и `php artisan schema:dump --database=mariadb`. `--prune` использовать только для намеренного нового squash после проверки всех целевых баз и обоих snapshots. В Sail для MariaDB schema load/dump требуется установленный `mariadb-client`.
 
 ---
 
@@ -386,7 +388,7 @@ class MyFeatureTest extends TestCase
 
 ## Реальная конкуренция на MariaDB
 
-`ActiveCollabSyncConcurrencyTest` пропускается при обычном SQLite-запуске. Он запускается отдельно с `phpunit.mariadb.xml`, требует PHP 8.5 с pdo_mysql и отдельную MariaDB 11.4.12. Перед каждым сценарием выполняется migrate:fresh **только** в БД с точным именем `sheetcollab_concurrency_test`; harness проверяет testing environment и mariadb driver до очистки. Не указывать production credentials/host и не использовать рабочий volume. Внешние DB-параметры задаются runner-окружением; DB_URL принудительно пуст.
+`ActiveCollabSyncConcurrencyTest` пропускается при обычном SQLite-запуске. Он запускается отдельно с `phpunit.mariadb.xml`, требует PHP 8.5 с pdo_mysql и отдельную MariaDB 12.3.3 LTS. Перед каждым сценарием выполняется migrate:fresh **только** в БД с точным именем `sheetcollab_concurrency_test`; harness проверяет testing environment и mariadb driver до очистки. Не указывать production credentials/host и не использовать рабочий volume. Внешние DB-параметры задаются runner-окружением; DB_URL принудительно пуст.
 
 ```bash
 DB_HOST=isolated-mariadb DB_PORT=3306 DB_DATABASE=sheetcollab_concurrency_test \
@@ -396,7 +398,7 @@ php vendor/bin/phpunit -c phpunit.mariadb.xml
 
 Рекомендуется выделенная internal Docker network, DB с tmpfs и отдельный PHP runner. Продуктовый compose и `.env` менять не нужно. Два независимых процесса приложения используют разные соединения с общей БД, файловый barrier и общий locked counter fake HTTP. Worker проверяет, что DB transactionLevel() на HTTP равен 0. Проверяются первый insert, существующий idle export, bound update, одновременный старт и независимые строки. Только один запрос одной записи отправляет HTTP; конкурент завершается 409 до освобождения победителя. Рабочий AC не вызывается.
 
-Новые feature-тесты моделируют timeout, malformed success, commit failure после внешнего успеха, недоступность сохранения unknown, поздний ответ, отражённый токен и безопасный повтор после mapping failure. Backfill tests покрывают dry-run, повторяемость, chunks, orphan/malformed snapshots и upgrade старой схемы; SQLite не заменяет проверку MariaDB locks.
+Новые feature-тесты моделируют timeout, malformed success, commit failure после внешнего успеха, недоступность сохранения unknown, поздний ответ, отражённый токен и безопасный повтор после mapping failure. Backfill tests покрывают dry-run, повторяемость, chunks и сохранение legacy records под squashed schema; SQLite не заменяет проверку MariaDB locks.
 
 
 ## Проверки восстановления (шаг 1.3)
@@ -419,7 +421,7 @@ node --test tests/AppsScript/activecollab_sync.test.cjs
 
 JS harness использует встроенные Node test/vm без новых npm-пакетов и исполняет реальный .gs с fake SpreadsheetApp/LockService/UrlFetchApp. Проверяет сохранение UUID до fetch, ожидание lock с перечитыванием, duplicate UUID между листами, новую копию, вставку/перемещение во время HTTP, удаление/дубликат target, network/validation/409, безопасный URL и манифест без внешнего HTTP. Это не live Google e2e.
 
-PHP tests покрывают UUID/legacy границы и scoped update, повторное использование locator, исторический source recovery, paused migration/dry-run/full coverage/idempotency/audit rollback, ограничения манифеста и guarded down. MariaDB suite дополнительно проверяет два процесса одного UUID на разных позициях, разные UUID на одной позиции и попытку переноса во время sync/recovery. Первый legacy insert проверяется уже после снятия global unique. SQLite не доказывает блокировки MariaDB.
+PHP tests покрывают UUID/legacy границы и scoped update, повторное использование locator, исторический source recovery, dry-run/full coverage/idempotency/audit rollback и ограничения манифеста. После squash schema snapshot является baseline; индивидуальные `down()` старых migrations больше не запускаются. MariaDB suite дополнительно проверяет два процесса одного UUID на разных позициях, разные UUID на одной позиции и попытку переноса во время sync/recovery. Первый legacy insert проверяется уже после снятия global unique. SQLite не доказывает блокировки MariaDB.
 
 ### Ручная проверка в отдельной Google-таблице
 

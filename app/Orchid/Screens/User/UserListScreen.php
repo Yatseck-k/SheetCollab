@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Orchid\Screens\User;
 
+use App\Models\ActiveCollabIntegration;
 use App\Models\User;
 use App\Orchid\Layouts\User\UserEditLayout;
 use App\Orchid\Layouts\User\UserFiltersLayout;
 use App\Orchid\Layouts\User\UserListLayout;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
 use Orchid\Screen\Action;
 use Orchid\Screen\Actions\Link;
@@ -25,6 +27,8 @@ class UserListScreen extends Screen
      */
     public function query(): iterable
     {
+        Gate::authorize('assign', ActiveCollabIntegration::class);
+
         return [
             'users' => User::with('roles')
                 ->filters(UserFiltersLayout::class)
@@ -49,15 +53,6 @@ class UserListScreen extends Screen
     public function description(): ?string
     {
         return 'A comprehensive list of all registered users, including their profiles and privileges.';
-    }
-
-    /** @return iterable<int, string> */
-    #[\Override]
-    public function permission(): ?iterable
-    {
-        return [
-            'platform.systems.users',
-        ];
     }
 
     /**

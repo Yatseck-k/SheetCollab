@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
-use App\Models\ActiveCollabIntegration;
 use App\Repositories\ActiveCollab\ActiveCollabIntegrationRepository;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabIntegrationRepositoryTest extends TestCase
@@ -24,7 +24,7 @@ class ActiveCollabIntegrationRepositoryTest extends TestCase
 
     public function test_find_by_spreadsheet_id_returns_active_integration(): void
     {
-        ActiveCollabIntegration::create([
+        ActiveCollabIntegrationFixture::create([
             'name' => 'Active Integration',
             'spreadsheet_id' => 'my-sheet',
             'active_collab_base_url' => 'https://ac.example.com/api/v1',
@@ -42,7 +42,7 @@ class ActiveCollabIntegrationRepositoryTest extends TestCase
 
     public function test_find_by_spreadsheet_id_returns_null_for_inactive_integration(): void
     {
-        ActiveCollabIntegration::create([
+        ActiveCollabIntegrationFixture::create([
             'name' => 'Inactive Integration',
             'spreadsheet_id' => 'my-sheet',
             'active_collab_base_url' => 'https://ac.example.com/api/v1',
@@ -65,7 +65,7 @@ class ActiveCollabIntegrationRepositoryTest extends TestCase
 
     public function test_find_by_spreadsheet_id_ignores_other_spreadsheet_ids(): void
     {
-        ActiveCollabIntegration::create([
+        ActiveCollabIntegrationFixture::create([
             'name' => 'Other Integration',
             'spreadsheet_id' => 'other-sheet',
             'active_collab_base_url' => 'https://ac.example.com/api/v1',

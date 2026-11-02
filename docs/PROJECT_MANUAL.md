@@ -1,5 +1,9 @@
 # Подробная документация проекта
 
+## Актуальное поведение этапа 2
+
+Канонический клиент вызывает `POST /api/tasks/sync` одним действием «Синхронизировать задачу». Сервер по стабильному UUID строки выбирает создание, обновление или пропуск; Task ID из ссылки не является авторизацией. Script Properties содержат индивидуальный `sc_…` токен конкретной интеграции. Выдача, просмотр, отзыв токенов и временное разрешение legacy-токена выполняются администратором через CLI `integrations:tokens`; см. [API Reference](API_REFERENCE.md) и [Deploy](DEPLOY.md#переход-скриптов-и-токенов-этап-2).
+
 > Актуальный технический срез проекта, результаты проверок и известные
 > ограничения собраны в [CURRENT_STATE.md](CURRENT_STATE.md).
 
@@ -45,7 +49,7 @@
 - вызывает Laravel API
 - пишет ссылку на задачу и ошибки обратно в таблицу
 
-Каноническая рабочая версия скрипта хранится не на диске, а в базе данных через Orchid-раздел `Apps Script`. Файл на диске используется как стартовый шаблон при первом создании записи.
+Канонический исходник — `resources/apps-script/activecollab_sync.gs` в Git. Orchid скачивает файл текущего deployment. Уже привязанные Google Sheets проекты обновляются вручную: deploy файла не меняет установленный скрипт.
 
 ## 3. Как устроена бизнес-логика
 
@@ -189,9 +193,9 @@ Create/update используют общий `sendRow()`: под document lock 
 
 - `POST /tasks` — создать задачу
 - `PUT /tasks/{taskId}` — обновить задачу
-- `GET /task-lists` — получить task lists из default ActiveCollab config
-- `GET /users` — получить пользователей из default ActiveCollab config
-- `GET /labels` — получить labels из default ActiveCollab config
+- `GET /task-lists` — получить task lists проекта аутентифицированной интеграции
+- `GET /users` — получить project members аутентифицированной интеграции
+- `GET /labels` — получить labels для проекта аутентифицированной интеграции
 
 ### Авторизация
 
@@ -254,10 +258,10 @@ Create/update используют общий `sendRow()`: под document lock 
 Перед этим данные интеграции нормализуются через `ActiveCollabIntegrationSettingsService`:
 
 - `spreadsheet_id` можно сохранить как ID или вставить полным URL
-- `active_collab_base_url` можно указать без `/api/v1`, сервис добавит его сам
+- интеграция использует явно выбранное ActiveCollab connection; старые URL/token поля и `ACTIVE_COLLAB_*` используются только для контролируемого backfill
 - `project_id` можно передать числом или ссылкой на проект
-- `active_collab_task_list_id` можно передать числом, ссылкой, названием списка или оставить пустым
-- если task list задан именем и не найден, сервис пытается создать его в ActiveCollab
+- `active_collab_task_list_id` выбирается среди существующих списков выбранного проекта
+- неизвестный task list отклоняется; сохранение настроек не создаёт внешние сущности
 
 ### Шаг 2. Проверка, не создана ли задача ранее
 
@@ -408,11 +412,11 @@ make artisan CMD='orchid:admin'
 - включать и выключать интеграцию
 - редактировать маппинги: `task_list_mapping`, `assignee_mapping`, `label_mapping`
 
-### Раздел `Apps Script`
+### Скачивание Apps Script
 
-- хранить канонический код `activecollab_sync.gs` в базе данных
-- редактировать без файловых прав на сервере
-- скачивать актуальную версию для Google Apps Script
+- скачивать канонический `activecollab_sync.gs` из текущего deployment
+- изменения скрипта вносятся в Git и попадают в скачивание после deployment
+- обновление файла не устанавливает код автоматически в связанные Google Sheets проекты
 
 ### Раздел `История экспортов`
 
@@ -436,7 +440,7 @@ make artisan CMD='orchid:admin'
 - поведение при отсутствии интеграции
 - нормализацию Google Sheets / ActiveCollab settings
 - mapping logic для ответственных и labels
-- сценарии выбора и создания Task List по имени
+- сценарии выбора существующего Task List из каталога выбранного connection
 
 Не покрыто:
 
@@ -545,17 +549,11 @@ URL: `/admin/integrations/create` или `/admin/integrations/{id}/edit`
 
 ---
 
-### Apps Script `/admin/script`
+### Скачивание Apps Script
 
-**Редактор Google Apps Script.**
+Кнопка «Скачать Apps Script» отдаёт файл `resources/apps-script/activecollab_sync.gs` текущего deployment. DB-editor снят; изменение файла в Git не меняет код, уже установленный в таблицах.
 
-Отображает текущее содержимое файла `activecollab_sync.gs` из базы данных.
-
-Действия:
-- **Сохранить** — записывает изменения в БД (не на диск)
-- **Скачать activecollab_sync.gs** — скачивает текущую версию для вставки в Google Apps Script
-
-После скачивания файл нужно вставить в Google Apps Script редактор проекта, привязанного к нужной таблице.
+До удаления архивной таблицы используйте `php artisan scripts:export-assets --output=script-assets-backup.json`; команда сохраняет все DB-версии в private storage, не изменяя БД и не печатая содержимое. Сверьте архив с Git и сохраните вне репозитория.
 
 ---
 
@@ -594,6 +592,18 @@ URL: `/admin/integrations/create` или `/admin/integrations/{id}/edit`
 
 - Создание ролей с произвольными permission-slug
 - Назначение разрешений через checkboxes
+
+### Роли и доступ к интеграциям
+
+Уровень доступа задаётся Orchid permission, а область данных — явным назначением интеграции пользователю в форме редактирования пользователя. Одно без другого не даёт доступ:
+
+| Возможность | Orchid permission | Назначение интеграции |
+|---|---|---|
+| Admin: connections и все интеграции, пользователи, роли, токены и аудит | `platform.activecollab.admin` (либо полный набор системных admin permissions) | Не требуется |
+| Manager: просмотр и изменение mappings назначенных интеграций | `platform.activecollab.integration.manage` и `platform.activecollab.integration.view` | Требуется |
+| Viewer: просмотр назначенных интеграций и их истории | `platform.activecollab.integration.view` | Требуется |
+
+Connections, destination интеграции, включение/выключение, назначения пользователей и выдача токенов доступны только admin. Recovery неизвестного результата остаётся admin-only и требует `platform.activecollab.recovery`, `platform.systems.users` и `platform.systems.roles`. Изменения настроек, ролей, назначений и credentials журналируются; токены и пароли в audit не попадают.
 
 ---
 
@@ -646,13 +656,7 @@ curl http://localhost/api/integrations/activecollab/task-lists \
 
 ### Если task list задан по имени
 
-При сохранении интеграции, если в поле «Task List ID» указано название (не число), сервис:
-1. Запрашивает AC API: `GET /projects/{id}/task-lists`
-2. Ищет совпадение по имени (без учёта регистра, trim)
-3. Если не найден — создаёт через `POST /projects/{id}/task-lists`
-4. Если создать не удалось — выбрасывает ошибку
-
-Это происходит **при сохранении формы в Orchid**, а не при каждом sync-запросе.
+Task List выбирается из каталога существующих списков для выбранного connection и проекта. Если ID не существует или каталог недоступен, сохранение завершится ошибкой валидации. Обычное сохранение не выполняет POST/PUT в ActiveCollab.
 
 ---
 
@@ -737,7 +741,7 @@ ngrok http 80
 
 ### Шифрование токена — ошибка decrypt
 
-Если `APP_KEY` изменился после сохранения `active_collab_api_token` в интеграции, значение нельзя расшифровать.
+Если `APP_KEY` изменился после сохранения encrypted ActiveCollab token в connection (или legacy integration), значение нельзя расшифровать. Runtime запросы при этом завершаются безопасно; восстановите token в Orchid.
 
 **Симптом:** `DecryptException` или пустой токен при вызове.
 
@@ -763,4 +767,4 @@ ngrok http 80
 
 POST/PUT сохраняют прежние envelopes, но после uuid_only требуют record_uuid. До перевода UUID-запрос блокируется legacy_binding_conflict; после перевода такой же конфликт получает запрос без UUID. MD5 и раздельные create/update пока сохранены, sync/skip — следующий этап. Общий token ещё не изолирует независимых пользователей.
 
-Канонический скачиваемый скрипт пока хранится в БД: экспортировать, сравнить custom-изменения с Git-шаблоном, сохранить проверенную версию в редакторе и только затем скачивать. Обновление файла не означает обновление рабочих таблиц. После UUID-привязок старый row-number код нельзя возвращать обычным rollback; процедура — DEPLOY.
+Канонический скачиваемый скрипт хранится в Git и отдаётся из текущего deployment. До contract-удаления `script_assets` архивируйте все строки командой `scripts:export-assets`, сравните custom-версии с Git и сохраните полезные изменения через review. Обновление файла не означает обновление рабочих таблиц. После UUID-привязок старый row-number код нельзя возвращать обычным rollback; процедура — DEPLOY.

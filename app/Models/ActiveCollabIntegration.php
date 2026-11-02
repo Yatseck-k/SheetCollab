@@ -6,7 +6,10 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
+/** @property bool $allow_legacy_token */
 class ActiveCollabIntegration extends Model
 {
     use HasUuids;
@@ -14,6 +17,7 @@ class ActiveCollabIntegration extends Model
     protected $fillable = [
         'name',
         'spreadsheet_id',
+        'connection_id',
         'active_collab_base_url',
         'active_collab_project_id',
         'active_collab_task_list_id',
@@ -33,14 +37,31 @@ class ActiveCollabIntegration extends Model
         'label_mapping' => 'array',
         'active' => 'boolean',
         'uuid_only' => 'boolean',
+        'allow_legacy_token' => 'boolean',
     ];
+
+    /** @return BelongsTo<ActiveCollabConnection, $this> */
+    public function activeCollabConnection(): BelongsTo
+    {
+        return $this->belongsTo(ActiveCollabConnection::class, 'connection_id');
+    }
+
+    /** @return BelongsToMany<User, $this> */
+    public function users(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'active_collab_integration_user', 'integration_id', 'user_id')
+            ->withTimestamps();
+    }
 
     public function resolvedBaseUrl(): string
     {
-        return rtrim(
-            trim((string) ($this->active_collab_base_url ?: config('services.active_collab.base_url'))),
-            '/',
-        );
+        $baseUrl = $this->activeCollabConnection?->base_url;
+
+        if (! is_string($baseUrl) || $baseUrl === '') {
+            throw new \LogicException('ActiveCollab connection is not assigned.');
+        }
+
+        return rtrim(trim($baseUrl), '/');
     }
 
     public function resolvedInstanceUrl(): string
@@ -52,6 +73,17 @@ class ActiveCollabIntegration extends Model
 
     public function resolvedApiToken(): string
     {
-        return trim((string) ($this->active_collab_api_token ?: config('services.active_collab.api_token')));
+        // The encrypted Eloquent cast may throw during decryption at runtime.
+        try {
+            $apiToken = $this->activeCollabConnection?->api_token;
+        } catch (\Throwable $exception) { // @phpstan-ignore catch.neverThrown
+            throw new \LogicException('ActiveCollab connection credentials are unavailable.', previous: $exception);
+        }
+
+        if (! is_string($apiToken) || trim($apiToken) === '') {
+            throw new \LogicException('ActiveCollab connection credentials are unavailable.');
+        }
+
+        return trim($apiToken);
     }
 }

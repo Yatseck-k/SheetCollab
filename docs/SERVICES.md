@@ -324,36 +324,23 @@ public function resolveTaskListId(string|int|null $value, string $baseUrl, strin
 
 `app/Services/GoogleAppsScriptService.php`
 
-Управляет хранением и раздачей файла Google Apps Script.
-
-**Константы:**
-- `SCRIPT_KEY = 'activecollab_sync.gs'`
-- `SCRIPT_NAME = 'ActiveCollab Sync Script'`
+Отдаёт канонический файл `resources/apps-script/activecollab_sync.gs` из текущего deployment.
 
 **Методы:**
 
 ```php
-// Путь к шаблонному файлу на диске
 public function path(): string
-
-// Читает содержимое скрипта из БД (создаёт запись если её нет)
 public function read(): string
-
-// Сохраняет новое содержимое в БД
-public function write(string $content): void
-
-// Отдаёт файл как StreamedResponse для скачивания
 public function download(): StreamedResponse
-
-// Проверяет наличие шаблонного файла на диске
-public function fileExists(): bool
 ```
 
-**Логика bootstrap:** При первом обращении к `asset()`, если в `script_assets` нет записи с `script_key = 'activecollab_sync.gs'`:
-1. Пытается прочитать `resources/apps-script/activecollab_sync.gs`.
-2. Если файла нет — создаёт запись с заглушкой-комментарием.
+Сервис не читает и не записывает `script_assets`, не создаёт DB bootstrap-записи и не имеет editor write-path. Уже установленные Google Sheets проекты deployment не меняет.
 
----
+### ExportScriptAssets
+
+`app/Console/Commands/ExportScriptAssets.php`
+
+`php artisan scripts:export-assets --output=<basename.json>` экспортирует все DB-версии, включая legacy keys, в `storage/app/private`. Имя файла — basename без директорий; существующий файл не перезаписывается. Команда выводит только количество строк, путь и SHA-256 архива. БД не изменяется.
 
 ## Repositories
 
@@ -604,11 +591,9 @@ public function remove(ActiveCollabIntegration $integration): void
 private function normalizeMapping(?array $rows): ?array
 ```
 
-### ScriptEditorScreen
+### Apps Script download
 
-`app/Orchid/Screens/Script/ScriptEditorScreen.php`
-
-Редактирование содержимого Apps Script через `GoogleAppsScriptService`.
+DB-editor удалён. Текущий файл скачивается напрямую по `platform.script.download` через `GoogleAppsScriptService`.
 
 ### ExportListScreen
 

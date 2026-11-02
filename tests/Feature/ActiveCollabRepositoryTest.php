@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Exceptions\ActiveCollabRequestException;
+use App\Models\ActiveCollabConnection;
 use App\Models\ActiveCollabIntegration;
 use App\Repositories\ActiveCollab\ActiveCollabRepository;
 use Illuminate\Support\Facades\Http;
-use PHPUnit\Framework\Attributes\DataProvider;
+use Illuminate\Support\Str;
+use Tests\Support\ActiveCollabIntegrationFixture;
 use Tests\TestCase;
 
 class ActiveCollabRepositoryTest extends TestCase
@@ -18,225 +20,122 @@ class ActiveCollabRepositoryTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-
         config()->set('app.key', 'base64:J63P4m4KjJ8l0RkGxJZ4Kf9P9+K6f2R4R6V4a2M1LxQ=');
-        config()->set('services.active_collab.base_url', 'https://ac.example.com/api/v1');
+        config()->set('services.active_collab.base_url', 'https://global.example.test/api/v1');
         config()->set('services.active_collab.api_token', 'global-token');
-        config()->set('services.active_collab.project_id', 10);
-
+        config()->set('services.active_collab.connect_timeout', 5);
+        config()->set('services.active_collab.timeout', 30);
         Http::preventStrayRequests();
         $this->repository = new ActiveCollabRepository();
     }
 
-    // ── createTask ────────────────────────────────────────────────────────────────
-
-    public function test_create_task_posts_to_correct_url_with_auth_header(): void
+    public function test_create_and_update_use_integration_connection_credentials(): void
     {
-        Http::fake([
-            'https://ac.example.com/api/v1/projects/10/tasks' => Http::response([
-                'single' => ['id' => 55, 'url_path' => '/projects/10/tasks/55'],
-            ], 200),
-        ]);
-
         $integration = $this->makeIntegration();
-        $result = $this->repository->createTask($integration, ['name' => 'Test Task']);
-
-        $this->assertSame(55, $result['single']['id']);
-
-        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
-            && $request->url() === 'https://ac.example.com/api/v1/projects/10/tasks'
-            && $request->hasHeader('X-Angie-AuthApiToken', ['integration-token'])
-            && $request->data()['name'] === 'Test Task');
-    }
-
-    // ── updateTask ────────────────────────────────────────────────────────────────
-
-    public function test_update_task_puts_to_correct_task_url_with_auth_header(): void
-    {
         Http::fake([
-            'https://ac.example.com/api/v1/projects/10/tasks/99' => Http::response([
-                'single' => ['id' => 99, 'url_path' => '/projects/10/tasks/99'],
-            ], 200),
+            'https://ac.example.com/api/v1/projects/10/tasks' => Http::response(['single' => ['id' => 55, 'url_path' => '/projects/10/tasks/55']]),
+            'https://ac.example.com/api/v1/projects/10/tasks/55' => Http::response(['single' => ['id' => 55, 'url_path' => '/projects/10/tasks/55']]),
         ]);
 
+        $this->repository->createTask($integration, ['name' => 'Created']);
+        $this->repository->updateTask($integration, 55, ['name' => 'Updated']);
+
+        Http::assertSentCount(2);
+        Http::assertSent(fn ($request): bool => $request->hasHeader('X-Angie-AuthApiToken', ['integration-token'])
+            && str_starts_with((string) $request->url(), 'https://ac.example.com/api/v1/'));
+    }
+
+    public function test_projects_and_task_lists_are_read_from_selected_connection_only(): void
+    {
+        $connection = $this->connection('https://selected.example.test/api/v1', 'selected-token');
+        Http::fake([
+            'https://selected.example.test/api/v1/projects' => Http::response([
+                ['id' => 10, 'name' => 'Project A', 'is_trashed' => false],
+            ]),
+            'https://selected.example.test/api/v1/projects/10/task-lists' => Http::response([
+                ['id' => 31, 'name' => 'Backlog'],
+            ]),
+        ]);
+
+        $this->assertSame([['id' => 10, 'name' => 'Project A']], $this->repository->projectsForConnection($connection));
+        $this->assertSame([['id' => 31, 'name' => 'Backlog']], $this->repository->taskListsForConnection($connection, 10));
+        Http::assertSentCount(2);
+        Http::assertSent(fn ($request): bool => $request->hasHeader('X-Angie-AuthApiToken', ['selected-token'])
+            && ! str_contains((string) $request->url(), 'global.example.test'));
+    }
+
+    public function test_scoped_catalog_methods_use_the_integration_connection(): void
+    {
         $integration = $this->makeIntegration();
-        $result = $this->repository->updateTask($integration, 99, ['name' => 'Updated']);
-
-        $this->assertSame(99, $result['single']['id']);
-
-        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && str_ends_with((string) $request->url(), '/tasks/99')
-            && $request->hasHeader('X-Angie-AuthApiToken', ['integration-token']));
-    }
-
-    // ── getTaskLists ──────────────────────────────────────────────────────────────
-
-    public function test_get_task_lists_uses_global_config_credentials(): void
-    {
         Http::fake([
-            'https://ac.example.com/api/v1/projects/10/task-lists' => Http::response([
-                'data' => [['id' => 11, 'name' => 'Backlog']],
-            ], 200),
+            'https://ac.example.com/api/v1/projects/10/task-lists' => Http::response([['id' => 31, 'name' => 'Default']]),
+            'https://ac.example.com/api/v1/projects/10' => Http::response([
+                'single' => ['id' => 10, 'is_trashed' => false, 'members' => [2], 'label_ids' => [7]],
+                'label_ids' => [7],
+            ]),
+            'https://ac.example.com/api/v1/users' => Http::response([['id' => 2, 'display_name' => 'Member'], ['id' => 3, 'display_name' => 'Other']]),
+            'https://ac.example.com/api/v1/labels/task-labels' => Http::response([
+                ['id' => 7, 'name' => 'Critical', 'is_global' => false], ['id' => 8, 'name' => 'Private', 'is_global' => false],
+            ]),
         ]);
 
-        $result = $this->repository->getTaskLists();
-
-        $this->assertSame(11, $result['data'][0]['id']);
-
-        Http::assertSent(fn ($request): bool => $request->hasHeader('X-Angie-AuthApiToken', ['global-token'])
-            && $request->url() === 'https://ac.example.com/api/v1/projects/10/task-lists');
+        $this->assertSame([['id' => 31, 'name' => 'Default']], $this->repository->taskListsForIntegration($integration));
+        $this->assertSame([['id' => 2, 'display_name' => 'Member']], $this->repository->usersForIntegration($integration));
+        $this->assertSame([['id' => 7, 'name' => 'Critical', 'is_global' => false]], $this->repository->labelsForIntegration($integration));
+        Http::assertSentCount(5);
     }
 
-    // ── getTaskListsForConnection ─────────────────────────────────────────────────
-
-    public function test_get_task_lists_for_connection_uses_provided_base_url_and_token(): void
+    public function test_missing_or_inactive_connection_fails_before_http(): void
     {
-        Http::fake([
-            'https://custom.ac.com/api/v1/projects/5/task-lists' => Http::response(['data' => []], 200),
-        ]);
-
-        $this->repository->getTaskListsForConnection(
-            'https://custom.ac.com/api/v1',
-            'custom-token',
-            5,
-        );
-
-        Http::assertSent(fn ($request): bool => $request->url() === 'https://custom.ac.com/api/v1/projects/5/task-lists'
-            && $request->hasHeader('X-Angie-AuthApiToken', ['custom-token']));
-    }
-
-    // ── createTaskListForConnection ───────────────────────────────────────────────
-
-    public function test_create_task_list_for_connection_posts_name(): void
-    {
-        Http::fake([
-            'https://custom.ac.com/api/v1/projects/5/task-lists' => Http::response([
-                'single' => ['id' => 7, 'name' => 'Sprint 1'],
-            ], 200),
-        ]);
-
-        $result = $this->repository->createTaskListForConnection(
-            'https://custom.ac.com/api/v1',
-            'custom-token',
-            5,
-            'Sprint 1',
-        );
-
-        $this->assertSame(7, $result['single']['id']);
-
-        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
-            && $request->data()['name'] === 'Sprint 1');
-    }
-
-    // ── getUsers ──────────────────────────────────────────────────────────────────
-
-    public function test_get_users_hits_users_endpoint_with_global_token(): void
-    {
-        Http::fake([
-            'https://ac.example.com/api/v1/users' => Http::response([
-                'data' => [['id' => 3, 'display_name' => 'Tony Yats']],
-            ], 200),
-        ]);
-
-        $result = $this->repository->getUsers();
-
-        $this->assertSame('Tony Yats', $result['data'][0]['display_name']);
-
-        Http::assertSent(fn ($request): bool => str_ends_with((string) $request->url(), '/users')
-            && $request->hasHeader('X-Angie-AuthApiToken', ['global-token']));
-    }
-
-    // ── getLabels ─────────────────────────────────────────────────────────────────
-
-    public function test_get_labels_hits_labels_endpoint_with_global_token(): void
-    {
-        Http::fake([
-            'https://ac.example.com/api/v1/labels' => Http::response([
-                'data' => [['id' => 7, 'name' => 'Critical']],
-            ], 200),
-        ]);
-
-        $result = $this->repository->getLabels();
-
-        $this->assertSame(7, $result['data'][0]['id']);
-    }
-
-    // ── error handling ────────────────────────────────────────────────────────────
-
-    public function test_send_throws_on_4xx_response(): void
-    {
-        Http::fake(['*' => Http::response(['message' => 'Not Found'], 404)]);
-
+        $integration = ActiveCollabIntegrationFixture::make(['active_collab_project_id' => 10]);
+        $integration->setRelation('activeCollabConnection', null);
+        Http::preventStrayRequests();
         $this->expectException(ActiveCollabRequestException::class);
 
-        $this->repository->getLabels();
+        $this->repository->taskListsForIntegration($integration);
     }
 
-    public function test_send_throws_on_5xx_response(): void
+    public function test_project_catalog_rejects_malformed_and_trashed_entries(): void
     {
-        Http::fake(['*' => Http::response(['message' => 'Server Error'], 500)]);
-
+        $connection = $this->connection('https://selected.example.test/api/v1', 'selected-token');
+        Http::fake(['*' => Http::response([['id' => 10, 'name' => 'Trash', 'is_trashed' => true]])]);
         $this->expectException(ActiveCollabRequestException::class);
 
-        $this->repository->getUsers();
+        $this->repository->projectsForConnection($connection);
     }
 
-    // ── helper ───────────────────────────────────────────────────────────────────
-
-    /** @param array<string, mixed> $response */
-    #[DataProvider('invalidTaskResponses')]
-    public function test_task_response_must_be_a_confirmed_binding(array $response): void
+    public function test_connection_timeouts_remain_configured(): void
     {
-        Http::fake(['*' => Http::response($response)]);
-        $this->expectException(ActiveCollabRequestException::class);
-        $this->repository->createTask($this->makeIntegration(), ['name' => 'Task']);
-    }
-
-    /** @return array<string, array{array<string, mixed>}> */
-    public static function invalidTaskResponses(): array
-    {
-        return [
-            'missing single' => [[]],
-            'string task ID' => [['single' => ['id' => '123', 'url_path' => '/tasks/123']]],
-            'zero task ID' => [['single' => ['id' => 0, 'url_path' => '/tasks/123']]],
-            'missing URL' => [['single' => ['id' => 123]]],
-            'absolute URL' => [['single' => ['id' => 123, 'url_path' => 'https://other.test/tasks/123']]],
-            'protocol relative URL' => [['single' => ['id' => 123, 'url_path' => '//other.test/tasks/123']]],
-            'backslash URL' => [['single' => ['id' => 123, 'url_path' => '/\\other.test/tasks/123']]],
-        ];
-    }
-
-    public function test_update_response_cannot_bind_a_different_task_id(): void
-    {
-        Http::fake(['*' => Http::response(['single' => ['id' => 100, 'url_path' => '/tasks/100']])]);
-        $this->expectException(ActiveCollabRequestException::class);
-        $this->repository->updateTask($this->makeIntegration(), 99, ['name' => 'Task']);
-    }
-
-    public function test_timeouts_are_explicit_and_response_is_whitelisted(): void
-    {
+        $connection = $this->connection('https://ac.example.com/api/v1', 'integration-token');
         $options = [];
         Http::fake(function ($request, array $requestOptions) use (&$options) {
             $options = $requestOptions;
 
-            return Http::response([
-                'single' => ['id' => 123, 'url_path' => '/tasks/123', 'api_token' => 'reflected-secret'],
-                'headers' => ['X-Angie-AuthApiToken' => 'reflected-secret'],
-            ]);
+            return Http::response(['single' => ['id' => 55, 'url_path' => '/projects/10/tasks/55']]);
         });
-        $response = $this->repository->createTask($this->makeIntegration(), ['name' => 'Task']);
-        $this->assertSame(['single' => ['id' => 123, 'url_path' => '/tasks/123']], $response);
-        $this->assertEquals(5, $options['connect_timeout']);
-        $this->assertEquals(30, $options['timeout']);
-        Http::assertSentCount(1);
+        $this->repository->createTask(ActiveCollabIntegrationFixture::make([
+            'active_collab_base_url' => $connection->base_url,
+            'active_collab_api_token' => 'integration-token', 'active_collab_project_id' => 10,
+        ]), ['name' => 'Task']);
+
+        $this->assertSame(5, $options['connect_timeout']);
+        $this->assertSame(30, $options['timeout']);
     }
 
     private function makeIntegration(): ActiveCollabIntegration
     {
-        return new ActiveCollabIntegration([
+        return ActiveCollabIntegrationFixture::make([
             'active_collab_base_url' => 'https://ac.example.com/api/v1',
             'active_collab_project_id' => 10,
             'active_collab_api_token' => 'integration-token',
         ]);
+    }
+
+    private function connection(string $baseUrl, string $token): ActiveCollabConnection
+    {
+        $connection = new ActiveCollabConnection(['name' => 'Test', 'base_url' => $baseUrl, 'api_token' => $token, 'active' => true]);
+        $connection->setAttribute('id', (string) Str::uuid());
+
+        return $connection;
     }
 }

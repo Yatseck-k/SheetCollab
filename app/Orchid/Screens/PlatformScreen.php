@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace App\Orchid\Screens;
 
+use App\Models\ActiveCollabIntegration;
+use App\Repositories\AdminDashboardRepository;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Orchid\Screen\Action;
 use Orchid\Screen\Screen;
 use Orchid\Support\Facades\Layout;
@@ -15,9 +19,14 @@ class PlatformScreen extends Screen
      *
      * @return iterable<string, mixed>
      */
-    public function query(): iterable
+    public function query(Request $request, AdminDashboardRepository $dashboard): iterable
     {
-        return [];
+        Gate::authorize('viewAny', ActiveCollabIntegration::class);
+
+        return $dashboard->forUser(
+            $request->user()->getAuthIdentifier(),
+            Gate::allows('manageConnection', ActiveCollabIntegration::class),
+        );
     }
 
     /**
@@ -26,7 +35,7 @@ class PlatformScreen extends Screen
     #[\Override]
     public function name(): ?string
     {
-        return 'Get Started';
+        return 'SheetCollab';
     }
 
     /**
@@ -35,7 +44,7 @@ class PlatformScreen extends Screen
     #[\Override]
     public function description(): ?string
     {
-        return 'Welcome to your Orchid application.';
+        return 'Состояние синхронизации и доступных интеграций';
     }
 
     /**
@@ -57,8 +66,7 @@ class PlatformScreen extends Screen
     public function layout(): iterable
     {
         return [
-            Layout::view('platform::partials.update-assets'),
-            Layout::view('platform::partials.welcome'),
+            Layout::view('admin.dashboard'),
         ];
     }
 }

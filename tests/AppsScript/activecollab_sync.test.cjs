@@ -8,6 +8,7 @@ const UUID = 'SheetCollab UUID';
 const LINK = 'Ссылка на задачу';
 const ERROR = 'Ошибка синхронизации';
 const DATE = 'Дата синхронизации';
+const ATTEMPT_DATE = 'Дата попытки';
 const headers = ['Серьезность', 'Стенд', 'Раздел', 'Описание проблемы', LINK, ERROR, DATE];
 const row = (description = 'Bug') => ['major', 'stage', 'Catalog', description, '', '', ''];
 const id = 'ae091ce2-282a-43ad-a258-85a2b8eecfc4';
@@ -65,7 +66,10 @@ function harness() {
       const request = { target, method: options.method, payload: JSON.parse(options.payload) };
       state.calls.push(request);
       const response = state.hook ? state.hook(request) : null;
-      return { getResponseCode: () => response?.code ?? 201, getContentText: () => response?.raw ?? JSON.stringify(response?.body ?? { data: { task_id: 123, task_url: url } }) };
+      const timestamp = '2026-11-02T10:00:00Z';
+      const success = { data: { record_uuid: request.payload.record_uuid, action: 'created', task_id: 123, task_url: url,
+        sync_hash: 'a'.repeat(64), operation_id: 'ae091ce2-282a-43ad-a258-85a2b8eecfc4', synced_at: timestamp, attempted_at: timestamp } };
+      return { getResponseCode: () => response?.code ?? 201, getContentText: () => response?.raw ?? JSON.stringify(response?.body ?? success) };
     } },
   });
   vm.runInContext(source, context);
@@ -141,18 +145,39 @@ test('duplicate UUID headers block HTTP', () => {
   const h = harness(); h.sheet.rows[0].push(UUID, UUID); h.context.createTaskFromRow(); assert.equal(h.calls.length, 0);
 });
 
-test('duplicate conflict restores link, unknown conflict never does', () => {
+test('server conflicts never bind a task link from a conflict response', () => {
   const h = harness(); h.hook = () => ({ code: 409, body: { message: 'Already created', data: { task_id: 123, task_url: url } } });
-  h.context.createTaskFromRow(); assert.equal(h.cell(LINK).url, url);
+  h.context.createTaskFromRow(); assert.equal(h.cell(LINK), '');
   const u = harness(); u.hook = () => ({ code: 409, body: { error: { code: 'sync_outcome_unknown' }, data: { task_id: 123, task_url: url } } });
   u.context.createTaskFromRow(); assert.equal(u.cell(LINK), '');
 });
 
-test('update includes UUID and verifies response task ID and safe URL', () => {
+test('update alias uses the single sync endpoint and verifies response identity and URL', () => {
   const h = harness(); h.set(LINK, { text: 'Open', url }); h.context.updateTaskFromRow();
-  assert.equal(h.calls[0].method, 'put'); assert.equal(h.calls[0].payload.record_uuid, h.cell(UUID));
+  assert.equal(h.calls[0].method, 'post'); assert.ok(h.calls[0].target.endsWith('/api/tasks/sync')); assert.equal(h.calls[0].payload.record_uuid, h.cell(UUID));
   const bad = harness(); bad.hook = () => ({ body: { data: { task_id: 123, task_url: 'javascript:alert(1)' } } }); bad.context.createTaskFromRow();
   assert.equal(bad.cell(LINK), ''); assert.ok(bad.cell(ERROR));
+});
+
+test('skip preserves confirmed date and stores the current attempt date separately', () => {
+  const h = harness();
+  h.hook = request => ({ code: 200, body: { data: { record_uuid: request.payload.record_uuid, action: 'skipped', task_id: 123,
+    task_url: url, sync_hash: 'b'.repeat(64), operation_id: id, synced_at: '2026-10-01T10:00:00Z', attempted_at: '2026-11-02T10:00:00Z' } } });
+  h.set(DATE, 'before');
+  h.set(ATTEMPT_DATE, 'earlier');
+  h.context.syncTaskFromRow();
+  assert.equal(h.cell(DATE), '2026-10-01T10:00:00Z');
+  assert.equal(h.cell(ATTEMPT_DATE), '2026-11-02T10:00:00Z');
+  assert.equal(h.cell(LINK).url, url);
+});
+
+test('mismatched response UUID is never written as a confirmed task link', () => {
+  const h = harness();
+  h.hook = () => ({ code: 201, body: { data: { record_uuid: randomUUID(), action: 'created', task_id: 123,
+    task_url: url, sync_hash: 'b'.repeat(64), operation_id: id, synced_at: '2026-11-02T10:00:00Z' } } });
+  h.context.syncTaskFromRow();
+  assert.equal(h.cell(LINK), '');
+  assert.notEqual(h.cell(ERROR), '');
 });
 
 test('manifest prepares all populated rows without HTTP and safely escapes dialog', () => {

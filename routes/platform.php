@@ -2,6 +2,9 @@
 
 declare(strict_types=1);
 
+use App\Orchid\Screens\Connection\ConnectionEditScreen;
+use App\Orchid\Screens\Connection\ConnectionListScreen;
+use App\Orchid\Screens\Export\ExportAttemptsScreen;
 use App\Orchid\Screens\Export\ExportListScreen;
 use App\Orchid\Screens\Export\ExportRecoveryScreen;
 use App\Orchid\Screens\Guide\GuideScreen;
@@ -10,7 +13,6 @@ use App\Orchid\Screens\Integration\IntegrationListScreen;
 use App\Orchid\Screens\PlatformScreen;
 use App\Orchid\Screens\Role\RoleEditScreen;
 use App\Orchid\Screens\Role\RoleListScreen;
-use App\Orchid\Screens\Script\ScriptEditorScreen;
 use App\Orchid\Screens\User\UserEditScreen;
 use App\Orchid\Screens\User\UserListScreen;
 use App\Orchid\Screens\User\UserProfileScreen;
@@ -18,18 +20,19 @@ use App\Services\GoogleAppsScriptService;
 use Illuminate\Support\Facades\Route;
 use Tabuna\Breadcrumbs\Trail;
 
-/*
-|--------------------------------------------------------------------------
-| Dashboard Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register web routes for your application. These
-| routes are loaded by the RouteServiceProvider within a group which
-| contains the need "dashboard" middleware group. Now create something great!
-|
-*/
-
 // Integrations
+Route::screen('connections/create', ConnectionEditScreen::class)
+    ->name('platform.connections.create')
+    ->breadcrumbs(fn (Trail $trail) => $trail->parent('platform.connections')->push('Новое подключение'));
+
+Route::screen('connections/{connection}/edit', ConnectionEditScreen::class)
+    ->name('platform.connections.edit')
+    ->breadcrumbs(fn (Trail $trail, $connection) => $trail->parent('platform.connections')->push($connection->name));
+
+Route::screen('connections', ConnectionListScreen::class)
+    ->name('platform.connections')
+    ->breadcrumbs(fn (Trail $trail) => $trail->parent('platform.index')->push('Подключения ActiveCollab'));
+
 Route::screen('integrations/create', IntegrationEditScreen::class)
     ->name('platform.integrations.create')
     ->breadcrumbs(fn (Trail $trail) => $trail
@@ -49,6 +52,10 @@ Route::screen('integrations', IntegrationListScreen::class)
         ->push('Интеграции'));
 
 // Exports
+Route::screen('exports/{export}/attempts', ExportAttemptsScreen::class)
+    ->name('platform.exports.attempts')
+    ->breadcrumbs(fn (Trail $trail) => $trail->parent('platform.exports')->push('Попытки синхронизации'));
+
 Route::screen('exports/{export}/recovery', ExportRecoveryScreen::class)->name('platform.exports.recovery');
 
 Route::screen('exports', ExportListScreen::class)
@@ -65,14 +72,11 @@ Route::screen('guide', GuideScreen::class)
         ->push('Инструкция'));
 
 // Apps Script
-Route::screen('script', ScriptEditorScreen::class)
-    ->name('platform.script')
-    ->breadcrumbs(fn (Trail $trail) => $trail
-        ->parent('platform.index')
-        ->push('Apps Script'));
-
 Route::get('script/download', fn (GoogleAppsScriptService $scriptService) => $scriptService->download())
     ->name('platform.script.download');
+
+// Keep retired editor URLs out of Orchid's generic screen fallback.
+Route::any('script/{retiredPath?}', static fn () => abort(404))->where('retiredPath', '.*');
 
 // Main
 Route::screen('/main', PlatformScreen::class)

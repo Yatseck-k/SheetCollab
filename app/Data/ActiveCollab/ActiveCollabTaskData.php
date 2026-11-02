@@ -30,6 +30,17 @@ readonly class ActiveCollabTaskData
         public ?string $recordUuid = null,
     ) {}
 
+    public static function normalizeSpreadsheetId(string $value): string
+    {
+        $parts = parse_url(trim($value));
+        if (($parts['scheme'] ?? null) === 'https' && ($parts['host'] ?? null) === 'docs.google.com'
+            && preg_match('#^/spreadsheets/d/([a-zA-Z0-9_-]+)(?:/|$)#', $parts['path'] ?? '', $matches) === 1) {
+            return $matches[1];
+        }
+
+        return trim($value);
+    }
+
     /** @param array<string, mixed> $data */
     public static function fromRequest(array $data): self
     {

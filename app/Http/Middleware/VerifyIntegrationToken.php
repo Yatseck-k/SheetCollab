@@ -9,20 +9,10 @@ use Symfony\Component\HttpFoundation\Response;
 
 class VerifyIntegrationToken
 {
+    public function __construct(private readonly AuthenticateActiveCollabIntegration $authentication) {}
+
     public function handle(Request $request, \Closure $next): Response
     {
-        $expected = config('services.google_sheets.integration_token');
-
-        if (! $expected) {
-            return response()->json(['message' => 'Integration token not configured.'], 500);
-        }
-
-        $provided = $request->bearerToken();
-
-        if (! $provided || ! hash_equals($expected, $provided)) {
-            return response()->json(['message' => 'Unauthorized.'], 401);
-        }
-
-        return $next($request);
+        return $this->authentication->handle($request, $next, 'legacy');
     }
 }
