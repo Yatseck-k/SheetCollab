@@ -12,7 +12,7 @@
     ],
     "license": "MIT",
     "require": {
-        "php": "^8.5",
+        "php": "^8.5.12",
         "laravel/framework": "^13.29.0",
         "laravel/tinker": "^3.0",
         "orchid/platform": "^14.53"

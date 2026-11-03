@@ -2,6 +2,13 @@ includes:
     - vendor/larastan/larastan/extension.neon
 
 parameters:
+    bootstrapFiles:
+        - vendor/larastan/larastan/bootstrap.php
+        - tools/prepare-phpstan-schema.php
+
+    squashedMigrationsPath:
+        - storage/phpstan/schema
+
     paths:
         - app
         - routes

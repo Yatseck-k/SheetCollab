@@ -1,46 +1,89 @@
 name: sheetcollab-prod
 
+x-app-env: &app-env
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_URL: ${APP_URL:?Set APP_URL in .env.production}
+  APP_KEY: ${APP_KEY:?Set APP_KEY in .env.production}
+  LOG_CHANNEL: stderr
+  LOG_LEVEL: warning
+  DB_CONNECTION: mariadb
+  DB_HOST: mariadb
+  DB_PORT: "3306"
+  DB_DATABASE: ${DB_DATABASE:?Set DB_DATABASE in .env.production}
+  DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in .env.production}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.production}
+  SESSION_DRIVER: database
+  SESSION_SECURE_COOKIE: "true"
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+
 services:
   app:
     build:
-      context: './vendor/laravel/sail/runtimes/8.5'
-      dockerfile: Dockerfile
-      args:
-        WWWGROUP: '${WWWGROUP:-1000}'
-    image: 'sheetcollab/app:php8.5'
-    command: php artisan serve --host=0.0.0.0 --port=8080
-    environment:
-      APP_ENV: production
-      APP_DEBUG: 'false'
-      APP_URL: '${APP_URL}'
-      WWWUSER: '${WWWUSER:-1000}'
-      LARAVEL_SAIL: 1
+      context: .
+      dockerfile: docker/production/Dockerfile
+    image: sheetcollab/app:php8.5.12
+    env_file:
+      - .env.production
+    environment: *app-env
     ports:
-      - '${APP_HTTP_PORT:-127.0.0.1:8088}:8080'
+      - "127.0.0.1:${APP_HTTP_PORT:-8088}:8080"
     volumes:
-      - '.:/var/www/html'
+      - app-storage:/var/www/html/storage/app
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - app
+
+  scheduler:
+    image: sheetcollab/app:php8.5.12
+    command: ["php", "artisan", "schedule:work"]
+    env_file:
+      - .env.production
+    environment: *app-env
+    depends_on:
+      app:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'artisan schedule:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     networks:
       - app
 
   mariadb:
-    image: 'mariadb:11.4.12'
+    image: mariadb:12.3.3
     environment:
-      MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
-      MYSQL_ROOT_HOST: '%'
-      MYSQL_DATABASE: '${DB_DATABASE}'
-      MYSQL_USER: '${DB_USERNAME}'
-      MYSQL_PASSWORD: '${DB_PASSWORD}'
-      MYSQL_ALLOW_EMPTY_PASSWORD: 'no'
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.production}
+      MARIADB_DATABASE: ${DB_DATABASE:?Set DB_DATABASE in .env.production}
+      MARIADB_USER: ${DB_USERNAME:?Set DB_USERNAME in .env.production}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.production}
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "no"
     volumes:
-      - 'prod-mariadb:/var/lib/mysql'
+      - prod-mariadb:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      retries: 5
+      interval: 10s
       timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - app
@@ -50,5 +93,7 @@ networks:
     driver: bridge
 
 volumes:
+  app-storage:
+    driver: local
   prod-mariadb:
     driver: local
